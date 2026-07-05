@@ -8,6 +8,7 @@ export struct MonitorEntry {
 
 component BrightnessSlider inherits Rectangle {
     in property <int> value;
+    in property <bool> dark-mode;
 
     callback changed(float);
     callback scrolled(int);
@@ -16,11 +17,56 @@ component BrightnessSlider inherits Rectangle {
     background: transparent;
 
     private property <length> thumb-size: 20px;
+    private property <length> slider-height: 24px;
     private property <length> track-width: max(1px, root.width - root.thumb-size);
+    private property <length> tick-width: 2px;
+    private property <length> tick-height: 7px;
+    private property <length> tick-y: 26px;
+    private property <brush> tick-color: root.dark-mode ? #FFFFFF14 : #00000073;
+
+    Rectangle {
+        x: root.tick-x(0);
+        y: root.tick-y;
+        width: root.tick-width;
+        height: root.tick-height;
+        background: root.tick-color;
+    }
+
+    Rectangle {
+        x: root.tick-x(25);
+        y: root.tick-y;
+        width: root.tick-width;
+        height: root.tick-height;
+        background: root.tick-color;
+    }
+
+    Rectangle {
+        x: root.tick-x(50);
+        y: root.tick-y;
+        width: root.tick-width;
+        height: root.tick-height;
+        background: root.tick-color;
+    }
+
+    Rectangle {
+        x: root.tick-x(75);
+        y: root.tick-y;
+        width: root.tick-width;
+        height: root.tick-height;
+        background: root.tick-color;
+    }
+
+    Rectangle {
+        x: root.tick-x(100);
+        y: root.tick-y;
+        width: root.tick-width;
+        height: root.tick-height;
+        background: root.tick-color;
+    }
 
     Slider {
         width: parent.width;
-        height: parent.height;
+        height: root.slider-height;
         minimum: 0;
         maximum: 100;
         step: 1;
@@ -54,6 +100,10 @@ component BrightnessSlider inherits Rectangle {
         }
 
         return max(0, min(100, position * 100 / range));
+    }
+
+    pure function tick-x(value: float) -> length {
+        return root.thumb-size / 2 + root.track-width * value / 100 - root.tick-width / 2;
     }
 }
 
@@ -105,6 +155,7 @@ component MonitorRow inherits Rectangle {
             BrightnessSlider {
                 horizontal-stretch: 1;
                 value: root.brightness;
+                dark-mode: root.dark-mode;
 
                 changed(value) => {
                     root.brightness-changed(value);
