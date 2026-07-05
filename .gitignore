@@ -1,0 +1,18 @@
+# Rust build output
+/target/
+
+# Local Codex workspace metadata
+/.agents/
+/.codex/
+
+# Local environment files
+.env
+.env.*
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*.tmp
+Thumbs.db
+Desktop.ini

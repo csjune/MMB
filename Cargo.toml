@@ -1,0 +1,38 @@
+[package]
+name = "mmb"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+description = "Multi Monitor Brightness"
+
+[dependencies]
+raw-window-handle = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-software",
+    "system-tray",
+    "image-default-formats",
+    "compat-1-2",
+    "raw-window-handle-06",
+] }
+windows-sys = { version = ">=0.59, <=0.61", features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+wmi = { version = "0.18.4", default-features = false }
+
+[build-dependencies]
+slint-build = "1.17"
+winresource = "0.1.31"
+
+[profile.release]
+lto = true
+strip = true

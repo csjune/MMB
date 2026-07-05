@@ -1,0 +1,344 @@
+import { Button, ScrollView, Slider } from "std-widgets.slint";
+
+export struct MonitorEntry {
+    id: int,
+    name: string,
+    brightness: int,
+}
+
+component BrightnessSlider inherits Rectangle {
+    in property <int> value;
+
+    callback changed(float);
+    callback scrolled(int);
+
+    height: 34px;
+    background: transparent;
+
+    private property <length> thumb-size: 20px;
+    private property <length> track-width: max(1px, root.width - root.thumb-size);
+
+    Slider {
+        width: parent.width;
+        height: parent.height;
+        minimum: 0;
+        maximum: 100;
+        step: 1;
+        value: root.value;
+
+        changed(value) => {
+            root.changed(value);
+        }
+    }
+
+    touch := TouchArea {
+        scroll-event(event) => {
+            root.scrolled(event.delta-y > 0px ? 5 : -5);
+            return EventResult.accept;
+        }
+
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.changed(root.position-to-value(touch.mouse-x - root.thumb-size / 2, root.track-width));
+            }
+        }
+
+        moved => {
+            root.changed(root.position-to-value(touch.mouse-x - root.thumb-size / 2, root.track-width));
+        }
+    }
+
+    pure function position-to-value(position: length, range: length) -> float {
+        if range <= 0px {
+            return 0;
+        }
+
+        return max(0, min(100, position * 100 / range));
+    }
+}
+
+component MonitorRow inherits Rectangle {
+    in property <int> monitor-id;
+    in property <string> name;
+    in property <int> brightness;
+    in property <bool> dark-mode;
+
+    callback brightness-changed(float);
+    callback brightness-scrolled(int);
+
+    height: 70px;
+    background: transparent;
+
+    private property <length> track-inset: 10px;
+
+    VerticalLayout {
+        spacing: 6px;
+
+        HorizontalLayout {
+            height: 24px;
+            spacing: 0px;
+
+            Rectangle {
+                width: root.track-inset;
+                background: transparent;
+            }
+
+            Text {
+                text: root.name;
+                color: root.dark-mode ? #f5f5f5 : #1f1f1f;
+                font-size: 14px;
+                horizontal-stretch: 1;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                width: root.track-inset;
+                background: transparent;
+            }
+        }
+
+        HorizontalLayout {
+            height: 34px;
+            spacing: 8px;
+
+            BrightnessSlider {
+                horizontal-stretch: 1;
+                value: root.brightness;
+
+                changed(value) => {
+                    root.brightness-changed(value);
+                }
+
+                scrolled(delta) => {
+                    root.brightness-scrolled(delta);
+                }
+            }
+
+            Text {
+                text: "\{root.brightness}";
+                color: root.dark-mode ? #f5f5f5 : #1f1f1f;
+                font-size: 14px;
+                width: 30px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                width: 4px;
+                background: transparent;
+            }
+        }
+    }
+}
+
+component IconButton inherits Rectangle {
+    callback clicked();
+
+    in property <string> symbol;
+    in property <bool> dark-mode;
+    in property <bool> checkable: false;
+    in-out property <bool> checked;
+
+    width: 32px;
+    height: 32px;
+    background: transparent;
+
+    Button {
+        width: parent.width;
+        height: parent.height;
+        text: "";
+        checkable: root.checkable;
+        checked <=> root.checked;
+
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Text {
+        text: root.symbol;
+        color: root.checked ? #ffffff : (root.dark-mode ? #f5f5f5 : #1f1f1f);
+        font-family: "Segoe UI Symbol";
+        font-size: 20px;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component MainWindow inherits Window {
+    in property <image> app-icon;
+    in-out property <[MonitorEntry]> monitors;
+    in-out property <bool> sync-all;
+    in-out property <bool> dark-mode;
+    in property <bool> has-monitors;
+    in property <length> body-height: 104px;
+
+    callback brightness-changed(int, float);
+    callback brightness-scrolled(int, int);
+    callback refresh-requested();
+    callback theme-toggle-requested();
+
+    title: "MMB";
+    icon: root.app-icon;
+    preferred-width: 348px;
+    preferred-height: 180px;
+    min-width: 348px;
+    max-width: 348px;
+    min-height: 148px;
+    max-height: 560px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+
+    Rectangle {
+        width: 348px;
+        height: parent.height;
+        background: root.dark-mode ? #202020 : #f3f3f3;
+        border-color: root.dark-mode ? #606060 : #8a8a8a;
+        border-width: 1px;
+        border-radius: 8px;
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            Rectangle {
+                height: root.body-height + 20px;
+                background: transparent;
+
+                if root.has-monitors : ScrollView {
+                    x: 14px;
+                    y: 10px;
+                    width: 320px;
+                    height: root.body-height;
+                    viewport-width: 320px;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                    VerticalLayout {
+                        padding: 0px;
+                        spacing: 12px;
+
+                        for monitor in root.monitors : MonitorRow {
+                            width: 320px;
+                            monitor-id: monitor.id;
+                            name: monitor.name;
+                            brightness: monitor.brightness;
+                            dark-mode: root.dark-mode;
+
+                            brightness-changed(value) => {
+                                root.brightness-changed(monitor.id, value);
+                            }
+
+                            brightness-scrolled(delta) => {
+                                root.brightness-scrolled(monitor.id, delta);
+                            }
+                        }
+                    }
+                }
+
+                if !root.has-monitors : Rectangle {
+                    x: 14px;
+                    y: 10px;
+                    width: 320px;
+                    height: root.body-height;
+                    background: transparent;
+
+                    Text {
+                        width: 320px;
+                        y: (parent.height - self.height) / 2;
+                        text: "No adjustable monitors found.";
+                        color: root.dark-mode ? #c8c8c8 : #666666;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 348px;
+                height: 1px;
+                background: root.dark-mode ? #3a3a3a : #d0d0d0;
+            }
+
+            Rectangle {
+                height: 54px;
+                background: transparent;
+
+                HorizontalLayout {
+                    x: 14px;
+                    y: 10px;
+                    width: 320px;
+                    height: 30px;
+                    spacing: 8px;
+
+                    Rectangle {
+                        background: transparent;
+                        horizontal-stretch: 1;
+                    }
+
+                    IconButton {
+                        dark-mode: root.dark-mode;
+                        symbol: "∞";
+                        checkable: true;
+                        checked <=> root.sync-all;
+                    }
+
+                    IconButton {
+                        dark-mode: root.dark-mode;
+                        symbol: root.dark-mode ? "☼" : "☾";
+
+                        clicked => {
+                            root.theme-toggle-requested();
+                        }
+                    }
+
+                    IconButton {
+                        dark-mode: root.dark-mode;
+                        symbol: "↻";
+
+                        clicked => {
+                            root.refresh-requested();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component TrayIcon inherits SystemTrayIcon {
+    in property <image> app-icon;
+
+    icon: root.app-icon;
+    tooltip: "MMB";
+    title: "MMB";
+
+    clicked => {
+        root.toggle-window();
+    }
+
+    callback toggle-window();
+    callback quit-requested();
+
+    Menu {
+        MenuItem {
+            title: "Show/Hide";
+            activated => {
+                root.toggle-window();
+            }
+        }
+
+        MenuSeparator {}
+
+        MenuItem {
+            title: "Quit";
+            activated => {
+                root.quit-requested();
+            }
+        }
+    }
+}
