@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-windows:
+    name: Release Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Package Windows binary
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          $assetName = "MMB-$tag-windows-x64"
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -Path target\release\mmb.exe -DestinationPath "dist\$assetName.zip" -CompressionLevel Optimal
+          $hash = (Get-FileHash "dist\$assetName.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path "dist\$assetName.zip.sha256" -Value "$hash  $assetName.zip" -NoNewline
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmb-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          gh release create $tag dist/*.zip dist/*.sha256 --repo "${{ github.repository }}" --title "MMB $tag" --generate-notes --verify-tag
