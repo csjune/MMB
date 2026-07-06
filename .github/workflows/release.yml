@@ -40,16 +40,14 @@ jobs:
       - name: Package Windows binary
         shell: pwsh
         run: |
-          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
-          $assetName = "MMB-$tag-windows-x64"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item -Path target\release\mmb.exe -Destination "dist\$assetName.exe"
+          Copy-Item -Path target\release\mmb.exe -Destination dist\mmb.exe
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: mmb-windows-x64
-          path: dist/*.exe
+          name: mmb.exe
+          path: dist/mmb.exe
 
       - name: Create GitHub release
         env:
@@ -58,7 +56,7 @@ jobs:
         run: |
           $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
           if (gh release view $tag --repo "${{ github.repository }}" *> $null) {
-            gh release upload $tag dist/*.exe --repo "${{ github.repository }}" --clobber
+            gh release upload $tag dist/mmb.exe --repo "${{ github.repository }}" --clobber
           } else {
-            gh release create $tag dist/*.exe --repo "${{ github.repository }}" --title "MMB $tag" --generate-notes --verify-tag
+            gh release create $tag dist/mmb.exe --repo "${{ github.repository }}" --title "MMB $tag" --generate-notes --verify-tag
           }
