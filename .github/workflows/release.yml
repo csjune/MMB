@@ -43,17 +43,13 @@ jobs:
           $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
           $assetName = "MMB-$tag-windows-x64"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive -Path target\release\mmb.exe -DestinationPath "dist\$assetName.zip" -CompressionLevel Optimal
-          $hash = (Get-FileHash "dist\$assetName.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content -Path "dist\$assetName.zip.sha256" -Value "$hash  $assetName.zip" -NoNewline
+          Copy-Item -Path target\release\mmb.exe -Destination "dist\$assetName.exe"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: mmb-windows-x64
-          path: |
-            dist/*.zip
-            dist/*.sha256
+          path: dist/*.exe
 
       - name: Create GitHub release
         env:
@@ -61,4 +57,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
-          gh release create $tag dist/*.zip dist/*.sha256 --repo "${{ github.repository }}" --title "MMB $tag" --generate-notes --verify-tag
+          if (gh release view $tag --repo "${{ github.repository }}" *> $null) {
+            gh release upload $tag dist/*.exe --repo "${{ github.repository }}" --clobber
+          } else {
+            gh release create $tag dist/*.exe --repo "${{ github.repository }}" --title "MMB $tag" --generate-notes --verify-tag
+          }
