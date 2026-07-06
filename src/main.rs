@@ -13,7 +13,7 @@ use slint::{
     TimerMode, VecModel,
 };
 
-use monitor_state::{brightness_after_scroll, MonitorState};
+use monitor_state::{MonitorState, brightness_after_scroll};
 
 slint::include_modules!();
 

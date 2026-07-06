@@ -394,7 +394,10 @@ mod platform {
 
     impl fmt::Display for WindowsIntegrationError {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(formatter, "Windows integration is only supported on Windows")
+            write!(
+                formatter,
+                "Windows integration is only supported on Windows"
+            )
         }
     }
 
