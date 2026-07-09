@@ -8,6 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+#[cfg(windows)]
+use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
 use slint::{
     CloseRequestResponse, ComponentHandle, Image, LogicalSize, ModelRc, PhysicalPosition, Timer,
     TimerMode, VecModel,
@@ -30,10 +32,13 @@ const TRAY_ICON_LIGHT_ICO: &[u8] = include_bytes!("../assets/tray-light.ico");
 const TRAY_ICON_DARK_ICO: &[u8] = include_bytes!("../assets/tray-dark.ico");
 
 fn main() -> Result<(), slint::PlatformError> {
-    slint::BackendSelector::new()
+    let backend = slint::BackendSelector::new()
         .backend_name("winit".into())
-        .renderer_name("software".into())
-        .select()?;
+        .renderer_name("software".into());
+    #[cfg(windows)]
+    let backend =
+        backend.with_winit_window_attributes_hook(|attributes| attributes.with_skip_taskbar(true));
+    backend.select()?;
 
     let app_icon = build_icon(APP_ICON_ICO);
     let tray_light_icon = build_icon(TRAY_ICON_LIGHT_ICO);
@@ -145,7 +150,6 @@ fn create_popup(
     popup
         .window()
         .on_close_requested(|| CloseRequestResponse::HideWindow);
-    windows_integration::hide_window_from_taskbar(popup.window());
 
     {
         let state = Rc::clone(&state);
@@ -277,7 +281,6 @@ fn toggle_popup(
     ));
     let popup_height = refresh_popup(popup, state);
     popup.show()?;
-    windows_integration::hide_window_from_taskbar(popup.window());
     position_popup(popup, popup_height);
     schedule_popup_position_correction(popup, popup_height, 0);
     schedule_popup_position_correction(popup, popup_height, 50);

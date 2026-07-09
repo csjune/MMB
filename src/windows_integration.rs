@@ -13,7 +13,6 @@ mod platform {
     use std::mem;
     use std::ptr;
 
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
@@ -26,11 +25,9 @@ mod platform {
     use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowExW, GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, HWND_BROADCAST, PostMessageW,
-        SMTO_ABORTIFHUNG, SMTO_NOTIMEOUTIFNOTHUNG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW, SendNotifyMessageW, SetWindowLongPtrW,
-        SetWindowPos, WM_DWMCOLORIZATIONCOLORCHANGED, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE,
-        WM_THEMECHANGED, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        FindWindowExW, GetCursorPos, HWND_BROADCAST, PostMessageW, SMTO_ABORTIFHUNG,
+        SMTO_NOTIMEOUTIFNOTHUNG, SendMessageTimeoutW, SendNotifyMessageW,
+        WM_DWMCOLORIZATIONCOLORCHANGED, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
     };
     use windows_sys::core::BOOL;
 
@@ -114,34 +111,6 @@ mod platform {
                 && point.x < right
                 && point.y >= top
                 && point.y < bottom
-        }
-    }
-
-    pub fn hide_window_from_taskbar(window: &slint::Window) {
-        let slint_window_handle = window.window_handle();
-        let Ok(window_handle) = slint_window_handle.window_handle() else {
-            return;
-        };
-
-        let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
-            return;
-        };
-
-        let hwnd = handle.hwnd.get() as HWND;
-        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
-        let next_style = (style | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
-
-        unsafe {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_style as isize);
-            SetWindowPos(
-                hwnd,
-                ptr::null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
         }
     }
 
@@ -415,8 +384,6 @@ mod platform {
         true
     }
 
-    pub fn hide_window_from_taskbar(_window: &slint::Window) {}
-
     pub fn windows_main_dark_mode() -> bool {
         false
     }
@@ -431,6 +398,6 @@ mod platform {
 }
 
 pub use platform::{
-    cursor_is_in_rect, hide_window_from_taskbar, left_mouse_button_down, next_windows_dark_mode,
-    set_windows_dark_mode, windows_main_dark_mode, work_area_near_cursor,
+    cursor_is_in_rect, left_mouse_button_down, next_windows_dark_mode, set_windows_dark_mode,
+    windows_main_dark_mode, work_area_near_cursor,
 };

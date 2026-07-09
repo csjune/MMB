@@ -1,21 +1,20 @@
 [package]
 name = "mmb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 build = "build.rs"
 description = "Multi Monitor Brightness"
 
 [dependencies]
-raw-window-handle = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 slint = { version = "1.17", default-features = false, features = [
     "std",
     "backend-winit",
     "renderer-software",
+    "unstable-winit-030",
     "system-tray",
     "image-default-formats",
     "compat-1-2",
-    "raw-window-handle-06",
 ] }
 windows-sys = { version = ">=0.59, <=0.61", features = [
     "Win32_Devices_Display",

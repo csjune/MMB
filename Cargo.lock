@@ -2562,9 +2562,8 @@ dependencies = [
 
 [[package]]
 name = "mmb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "raw-window-handle",
  "serde",
  "slint",
  "slint-build",
@@ -4032,6 +4031,7 @@ checksum = "a54a407d1a0cbaa71d830ae7c236064b171368ea18db3b51ea3f2ce3f19519ee"
 dependencies = [
  "const-field-offset",
  "i-slint-backend-selector",
+ "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
@@ -4039,7 +4039,6 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
- "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",
