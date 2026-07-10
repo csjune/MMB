@@ -36,8 +36,11 @@ fn main() -> Result<(), slint::PlatformError> {
         .backend_name("winit".into())
         .renderer_name("software".into());
     #[cfg(windows)]
-    let backend =
-        backend.with_winit_window_attributes_hook(|attributes| attributes.with_skip_taskbar(true));
+    let backend = backend.with_winit_window_attributes_hook(|attributes| {
+        attributes
+            .with_skip_taskbar(true)
+            .with_undecorated_shadow(true)
+    });
     backend.select()?;
 
     let app_icon = build_icon(APP_ICON_ICO);
