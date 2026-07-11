@@ -189,6 +189,8 @@ component IconButton inherits Rectangle {
     in property <string> symbol;
     in property <bool> dark-mode;
     in property <bool> checkable: false;
+    in property <length> icon-x: 0px;
+    in property <length> icon-y: 0px;
     in-out property <bool> checked;
 
     width: 32px;
@@ -208,9 +210,11 @@ component IconButton inherits Rectangle {
     }
 
     Text {
+        x: root.icon-x;
+        y: root.icon-y;
         text: root.symbol;
         color: root.checked ? #ffffff : (root.dark-mode ? #f5f5f5 : #1f1f1f);
-        font-family: "Segoe UI Symbol";
+        font-family: "Segoe Fluent Icons";
         font-size: 20px;
         width: parent.width;
         height: parent.height;
@@ -333,14 +337,17 @@ export component MainWindow inherits Window {
 
                     IconButton {
                         dark-mode: root.dark-mode;
-                        symbol: "∞";
+                        symbol: "\u{e71b}";
+                        icon-x: 1px;
+                        icon-y: 1px;
                         checkable: true;
                         checked <=> root.sync-all;
                     }
 
                     IconButton {
                         dark-mode: root.dark-mode;
-                        symbol: root.dark-mode ? "☼" : "☾";
+                        symbol: root.dark-mode ? "\u{e706}" : "\u{e708}";
+                        icon-x: 1px;
 
                         clicked => {
                             root.theme-toggle-requested();
@@ -349,7 +356,9 @@ export component MainWindow inherits Window {
 
                     IconButton {
                         dark-mode: root.dark-mode;
-                        symbol: "↻";
+                        symbol: "\u{e72c}";
+                        icon-x: 1px;
+                        icon-y: 1px;
 
                         clicked => {
                             root.refresh-requested();
