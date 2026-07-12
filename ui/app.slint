@@ -35,6 +35,7 @@ export struct MonitorEntry {
 
 component BrightnessSlider inherits Rectangle {
     in property <int> value;
+    in property <string> accessible-name;
 
     callback changed(float);
     callback scrolled(int);
@@ -96,6 +97,7 @@ component BrightnessSlider inherits Rectangle {
         maximum: 100;
         step: 1;
         value: root.value;
+        accessible-label: root.accessible-name;
 
         changed(value) => {
             root.changed(value);
@@ -104,8 +106,15 @@ component BrightnessSlider inherits Rectangle {
 
     touch := TouchArea {
         scroll-event(event) => {
-            root.scrolled(event.delta-y > 0px ? 5 : -5);
-            return EventResult.accept;
+            if event.delta-y > 0px {
+                root.scrolled(5);
+                return EventResult.accept;
+            } else if event.delta-y < 0px {
+                root.scrolled(-5);
+                return EventResult.accept;
+            }
+
+            return EventResult.reject;
         }
 
         pointer-event(event) => {
@@ -179,6 +188,7 @@ component MonitorRow inherits Rectangle {
             BrightnessSlider {
                 horizontal-stretch: 1;
                 value: root.brightness;
+                accessible-name: "\{root.name} brightness";
 
                 changed(value) => {
                     root.brightness-changed(value);
@@ -210,6 +220,7 @@ component IconButton inherits Rectangle {
     callback clicked();
 
     in property <string> symbol;
+    in property <string> accessible-name;
     in property <bool> checkable: false;
     in property <length> icon-x: 0px;
     in property <length> icon-y: 0px;
@@ -223,6 +234,7 @@ component IconButton inherits Rectangle {
         width: parent.width;
         height: parent.height;
         text: "";
+        accessible-label: root.accessible-name;
         checkable: root.checkable;
         checked <=> root.checked;
 
@@ -358,6 +370,7 @@ export component MainWindow inherits Window {
 
                     IconButton {
                         symbol: "\u{e71b}";
+                        accessible-name: "Synchronize all monitors";
                         icon-x: 1px;
                         icon-y: 1px;
                         checkable: true;
@@ -366,6 +379,7 @@ export component MainWindow inherits Window {
 
                     IconButton {
                         symbol: root.dark-mode ? "\u{e706}" : "\u{e708}";
+                        accessible-name: root.dark-mode ? "Switch to light mode" : "Switch to dark mode";
                         icon-x: 1px;
 
                         clicked => {
@@ -375,6 +389,7 @@ export component MainWindow inherits Window {
 
                     IconButton {
                         symbol: "\u{e72c}";
+                        accessible-name: "Refresh monitors";
                         icon-x: 1px;
                         icon-y: 1px;
 
