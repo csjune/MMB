@@ -1,5 +1,32 @@
 import { Button, ScrollView, Slider } from "std-widgets.slint";
 
+global AppPalette {
+    in-out property <bool> dark-mode;
+    out property <brush> foreground: dark-mode ? #f5f5f5 : #1f1f1f;
+    out property <brush> muted-foreground: dark-mode ? #c8c8c8 : #666666;
+    out property <brush> window-background: dark-mode ? #202020 : #f3f3f3;
+    out property <brush> window-border: dark-mode ? #606060 : #8a8a8a;
+    out property <brush> divider: dark-mode ? #3a3a3a : #d0d0d0;
+    out property <brush> tick: dark-mode ? #FFFFFF14 : #00000073;
+    out property <brush> checked-foreground: #ffffff;
+}
+
+export global PopupMetrics {
+    out property <length> window-width: 348px;
+    out property <length> min-window-height: 148px;
+    out property <length> max-window-height: 560px;
+    out property <length> chrome-height: 75px;
+    out property <length> empty-body-height: 104px;
+    out property <length> monitor-row-height: 70px;
+    out property <length> monitor-row-spacing: 12px;
+    out property <length> content-padding: 14px;
+    out property <length> body-padding: 10px;
+    out property <length> footer-height: 54px;
+    out property <length> divider-height: 1px;
+    out property <length> button-size: 32px;
+    out property <length> content-width: window-width - content-padding * 2;
+}
+
 export struct MonitorEntry {
     id: int,
     name: string,
@@ -8,7 +35,6 @@ export struct MonitorEntry {
 
 component BrightnessSlider inherits Rectangle {
     in property <int> value;
-    in property <bool> dark-mode;
 
     callback changed(float);
     callback scrolled(int);
@@ -22,14 +48,13 @@ component BrightnessSlider inherits Rectangle {
     private property <length> tick-width: 2px;
     private property <length> tick-height: 7px;
     private property <length> tick-y: 26px;
-    private property <brush> tick-color: root.dark-mode ? #FFFFFF14 : #00000073;
 
     Rectangle {
         x: root.tick-x(0);
         y: root.tick-y;
         width: root.tick-width;
         height: root.tick-height;
-        background: root.tick-color;
+        background: AppPalette.tick;
     }
 
     Rectangle {
@@ -37,7 +62,7 @@ component BrightnessSlider inherits Rectangle {
         y: root.tick-y;
         width: root.tick-width;
         height: root.tick-height;
-        background: root.tick-color;
+        background: AppPalette.tick;
     }
 
     Rectangle {
@@ -45,7 +70,7 @@ component BrightnessSlider inherits Rectangle {
         y: root.tick-y;
         width: root.tick-width;
         height: root.tick-height;
-        background: root.tick-color;
+        background: AppPalette.tick;
     }
 
     Rectangle {
@@ -53,7 +78,7 @@ component BrightnessSlider inherits Rectangle {
         y: root.tick-y;
         width: root.tick-width;
         height: root.tick-height;
-        background: root.tick-color;
+        background: AppPalette.tick;
     }
 
     Rectangle {
@@ -61,7 +86,7 @@ component BrightnessSlider inherits Rectangle {
         y: root.tick-y;
         width: root.tick-width;
         height: root.tick-height;
-        background: root.tick-color;
+        background: AppPalette.tick;
     }
 
     Slider {
@@ -111,12 +136,11 @@ component MonitorRow inherits Rectangle {
     in property <int> monitor-id;
     in property <string> name;
     in property <int> brightness;
-    in property <bool> dark-mode;
 
     callback brightness-changed(float);
     callback brightness-scrolled(int);
 
-    height: 70px;
+    height: PopupMetrics.monitor-row-height;
     background: transparent;
 
     private property <length> track-inset: 10px;
@@ -135,7 +159,7 @@ component MonitorRow inherits Rectangle {
 
             Text {
                 text: root.name;
-                color: root.dark-mode ? #f5f5f5 : #1f1f1f;
+                color: AppPalette.foreground;
                 font-size: 14px;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -155,7 +179,6 @@ component MonitorRow inherits Rectangle {
             BrightnessSlider {
                 horizontal-stretch: 1;
                 value: root.brightness;
-                dark-mode: root.dark-mode;
 
                 changed(value) => {
                     root.brightness-changed(value);
@@ -168,7 +191,7 @@ component MonitorRow inherits Rectangle {
 
             Text {
                 text: "\{root.brightness}";
-                color: root.dark-mode ? #f5f5f5 : #1f1f1f;
+                color: AppPalette.foreground;
                 font-size: 14px;
                 width: 30px;
                 horizontal-alignment: right;
@@ -187,14 +210,13 @@ component IconButton inherits Rectangle {
     callback clicked();
 
     in property <string> symbol;
-    in property <bool> dark-mode;
     in property <bool> checkable: false;
     in property <length> icon-x: 0px;
     in property <length> icon-y: 0px;
     in-out property <bool> checked;
 
-    width: 32px;
-    height: 32px;
+    width: PopupMetrics.button-size;
+    height: PopupMetrics.button-size;
     background: transparent;
 
     Button {
@@ -213,7 +235,7 @@ component IconButton inherits Rectangle {
         x: root.icon-x;
         y: root.icon-y;
         text: root.symbol;
-        color: root.checked ? #ffffff : (root.dark-mode ? #f5f5f5 : #1f1f1f);
+        color: root.checked ? AppPalette.checked-foreground : AppPalette.foreground;
         font-family: "Segoe Fluent Icons";
         font-size: 20px;
         width: parent.width;
@@ -227,7 +249,7 @@ export component MainWindow inherits Window {
     in property <image> app-icon;
     in-out property <[MonitorEntry]> monitors;
     in-out property <bool> sync-all;
-    in-out property <bool> dark-mode;
+    in-out property <bool> dark-mode <=> AppPalette.dark-mode;
     in property <bool> has-monitors;
     in property <length> body-height: 104px;
 
@@ -238,21 +260,21 @@ export component MainWindow inherits Window {
 
     title: "MMB";
     icon: root.app-icon;
-    preferred-width: 348px;
+    preferred-width: PopupMetrics.window-width;
     preferred-height: 180px;
-    min-width: 348px;
-    max-width: 348px;
-    min-height: 148px;
-    max-height: 560px;
+    min-width: PopupMetrics.window-width;
+    max-width: PopupMetrics.window-width;
+    min-height: PopupMetrics.min-window-height;
+    max-height: PopupMetrics.max-window-height;
     no-frame: true;
     always-on-top: true;
     background: transparent;
 
     Rectangle {
-        width: 348px;
+        width: PopupMetrics.window-width;
         height: parent.height;
-        background: root.dark-mode ? #202020 : #f3f3f3;
-        border-color: root.dark-mode ? #606060 : #8a8a8a;
+        background: AppPalette.window-background;
+        border-color: AppPalette.window-border;
         border-width: 1px;
         border-radius: 8px;
 
@@ -261,27 +283,26 @@ export component MainWindow inherits Window {
             spacing: 0px;
 
             Rectangle {
-                height: root.body-height + 20px;
+                height: root.body-height + PopupMetrics.body-padding * 2;
                 background: transparent;
 
                 if root.has-monitors : ScrollView {
-                    x: 14px;
-                    y: 10px;
-                    width: 320px;
+                    x: PopupMetrics.content-padding;
+                    y: PopupMetrics.body-padding;
+                    width: PopupMetrics.content-width;
                     height: root.body-height;
-                    viewport-width: 320px;
+                    viewport-width: PopupMetrics.content-width;
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
                     VerticalLayout {
                         padding: 0px;
-                        spacing: 12px;
+                        spacing: PopupMetrics.monitor-row-spacing;
 
                         for monitor in root.monitors : MonitorRow {
-                            width: 320px;
+                            width: PopupMetrics.content-width;
                             monitor-id: monitor.id;
                             name: monitor.name;
                             brightness: monitor.brightness;
-                            dark-mode: root.dark-mode;
 
                             brightness-changed(value) => {
                                 root.brightness-changed(monitor.id, value);
@@ -295,17 +316,17 @@ export component MainWindow inherits Window {
                 }
 
                 if !root.has-monitors : Rectangle {
-                    x: 14px;
-                    y: 10px;
-                    width: 320px;
+                    x: PopupMetrics.content-padding;
+                    y: PopupMetrics.body-padding;
+                    width: PopupMetrics.content-width;
                     height: root.body-height;
                     background: transparent;
 
                     Text {
-                        width: 320px;
+                        width: PopupMetrics.content-width;
                         y: (parent.height - self.height) / 2;
                         text: "No adjustable monitors found.";
-                        color: root.dark-mode ? #c8c8c8 : #666666;
+                        color: AppPalette.muted-foreground;
                         font-size: 14px;
                         horizontal-alignment: center;
                         wrap: word-wrap;
@@ -314,19 +335,19 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                width: 348px;
-                height: 1px;
-                background: root.dark-mode ? #3a3a3a : #d0d0d0;
+                width: PopupMetrics.window-width;
+                height: PopupMetrics.divider-height;
+                background: AppPalette.divider;
             }
 
             Rectangle {
-                height: 54px;
+                height: PopupMetrics.footer-height;
                 background: transparent;
 
                 HorizontalLayout {
-                    x: 14px;
-                    y: 10px;
-                    width: 320px;
+                    x: PopupMetrics.content-padding;
+                    y: PopupMetrics.body-padding;
+                    width: PopupMetrics.content-width;
                     height: 30px;
                     spacing: 8px;
 
@@ -336,7 +357,6 @@ export component MainWindow inherits Window {
                     }
 
                     IconButton {
-                        dark-mode: root.dark-mode;
                         symbol: "\u{e71b}";
                         icon-x: 1px;
                         icon-y: 1px;
@@ -345,7 +365,6 @@ export component MainWindow inherits Window {
                     }
 
                     IconButton {
-                        dark-mode: root.dark-mode;
                         symbol: root.dark-mode ? "\u{e706}" : "\u{e708}";
                         icon-x: 1px;
 
@@ -355,7 +374,6 @@ export component MainWindow inherits Window {
                     }
 
                     IconButton {
-                        dark-mode: root.dark-mode;
                         symbol: "\u{e72c}";
                         icon-x: 1px;
                         icon-y: 1px;
