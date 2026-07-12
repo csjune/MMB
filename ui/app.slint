@@ -15,7 +15,6 @@ export global PopupMetrics {
     out property <length> window-width: 348px;
     out property <length> min-window-height: 148px;
     out property <length> max-window-height: 560px;
-    out property <length> chrome-height: 75px;
     out property <length> empty-body-height: 104px;
     out property <length> monitor-row-height: 70px;
     out property <length> monitor-row-spacing: 12px;
@@ -24,6 +23,7 @@ export global PopupMetrics {
     out property <length> footer-height: 54px;
     out property <length> divider-height: 1px;
     out property <length> button-size: 32px;
+    out property <length> chrome-height: body-padding * 2 + divider-height + footer-height;
     out property <length> content-width: window-width - content-padding * 2;
 }
 
@@ -263,7 +263,7 @@ export component MainWindow inherits Window {
     in-out property <bool> sync-all;
     in-out property <bool> dark-mode <=> AppPalette.dark-mode;
     in property <bool> has-monitors;
-    in property <length> body-height: 104px;
+    in property <length> body-height: PopupMetrics.empty-body-height;
 
     callback brightness-changed(int, float);
     callback brightness-scrolled(int, int);
@@ -273,7 +273,7 @@ export component MainWindow inherits Window {
     title: "MMB";
     icon: root.app-icon;
     preferred-width: PopupMetrics.window-width;
-    preferred-height: 180px;
+    preferred-height: PopupMetrics.chrome-height + PopupMetrics.empty-body-height;
     min-width: PopupMetrics.window-width;
     max-width: PopupMetrics.window-width;
     min-height: PopupMetrics.min-window-height;
@@ -360,7 +360,7 @@ export component MainWindow inherits Window {
                     x: PopupMetrics.content-padding;
                     y: PopupMetrics.body-padding;
                     width: PopupMetrics.content-width;
-                    height: 30px;
+                    height: PopupMetrics.button-size;
                     spacing: 8px;
 
                     Rectangle {
