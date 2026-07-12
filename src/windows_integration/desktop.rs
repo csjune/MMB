@@ -6,7 +6,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     MonitorFromPoint,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use super::WorkArea;
@@ -49,22 +48,6 @@ pub fn work_area_near_cursor() -> Option<WorkArea> {
             bottom: info.monitorInfo.rcWork.bottom,
             scale_factor: scale_factor_for_monitor(monitor),
         })
-    }
-}
-
-pub fn left_mouse_button_down() -> bool {
-    unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 }
-}
-
-pub fn cursor_is_in_rect(left: i32, top: i32, right: i32, bottom: i32) -> bool {
-    let mut point = POINT { x: 0, y: 0 };
-
-    unsafe {
-        GetCursorPos(&mut point) != 0
-            && point.x >= left
-            && point.x < right
-            && point.y >= top
-            && point.y < bottom
     }
 }
 

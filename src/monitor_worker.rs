@@ -1,5 +1,5 @@
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use crate::monitor_hardware::{ApplyReport, BrightnessUpdate, MonitorController, RefreshResult};
 
@@ -11,12 +11,16 @@ enum MonitorCommand {
         request_id: u64,
         updates: Vec<BrightnessUpdate>,
     },
-    Shutdown,
+    ApplyThenRefresh {
+        request_id: u64,
+        updates: Vec<BrightnessUpdate>,
+    },
 }
 
 pub(crate) enum MonitorEvent {
     Refreshed {
         request_id: u64,
+        apply_report: Option<ApplyReport>,
         result: Result<RefreshResult, String>,
     },
     Applied {
@@ -25,23 +29,28 @@ pub(crate) enum MonitorEvent {
     },
 }
 
+pub(crate) struct MonitorSendError {
+    pub(crate) message: String,
+    pub(crate) updates: Vec<BrightnessUpdate>,
+}
+
 pub(crate) struct MonitorWorker {
     commands: Sender<MonitorCommand>,
     events: Receiver<MonitorEvent>,
-    thread: Option<JoinHandle<()>>,
 }
 
 impl MonitorWorker {
     pub(crate) fn new() -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
-        let thread = thread::spawn(move || {
+        thread::spawn(move || {
             let mut controller = MonitorController::new();
 
             while let Ok(command) = command_receiver.recv() {
                 let event = match command {
                     MonitorCommand::Refresh { request_id } => MonitorEvent::Refreshed {
                         request_id,
+                        apply_report: None,
                         result: controller.refresh().map_err(|error| error.to_string()),
                     },
                     MonitorCommand::Apply {
@@ -51,7 +60,14 @@ impl MonitorWorker {
                         request_id,
                         report: controller.apply(updates),
                     },
-                    MonitorCommand::Shutdown => break,
+                    MonitorCommand::ApplyThenRefresh {
+                        request_id,
+                        updates,
+                    } => MonitorEvent::Refreshed {
+                        request_id,
+                        apply_report: Some(controller.apply(updates)),
+                        result: controller.refresh().map_err(|error| error.to_string()),
+                    },
                 };
 
                 if event_sender.send(event).is_err() {
@@ -63,39 +79,48 @@ impl MonitorWorker {
         Self {
             commands: command_sender,
             events: event_receiver,
-            thread: Some(thread),
         }
     }
 
-    pub(crate) fn refresh(&self, request_id: u64) -> Result<(), String> {
-        self.commands
-            .send(MonitorCommand::Refresh { request_id })
-            .map_err(|error| error.to_string())
+    pub(crate) fn refresh(&self, request_id: u64) -> Result<(), MonitorSendError> {
+        self.send(MonitorCommand::Refresh { request_id })
     }
 
     pub(crate) fn apply(
         &self,
         request_id: u64,
         updates: Vec<BrightnessUpdate>,
-    ) -> Result<(), String> {
-        self.commands
-            .send(MonitorCommand::Apply {
-                request_id,
-                updates,
-            })
-            .map_err(|error| error.to_string())
+    ) -> Result<(), MonitorSendError> {
+        self.send(MonitorCommand::Apply {
+            request_id,
+            updates,
+        })
+    }
+
+    pub(crate) fn apply_then_refresh(
+        &self,
+        request_id: u64,
+        updates: Vec<BrightnessUpdate>,
+    ) -> Result<(), MonitorSendError> {
+        self.send(MonitorCommand::ApplyThenRefresh {
+            request_id,
+            updates,
+        })
     }
 
     pub(crate) fn try_recv(&self) -> Result<MonitorEvent, TryRecvError> {
         self.events.try_recv()
     }
-}
 
-impl Drop for MonitorWorker {
-    fn drop(&mut self) {
-        let _ = self.commands.send(MonitorCommand::Shutdown);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+    fn send(&self, command: MonitorCommand) -> Result<(), MonitorSendError> {
+        self.commands.send(command).map_err(|error| {
+            let message = error.to_string();
+            let updates = match error.0 {
+                MonitorCommand::Apply { updates, .. }
+                | MonitorCommand::ApplyThenRefresh { updates, .. } => updates,
+                MonitorCommand::Refresh { .. } => Vec::new(),
+            };
+            MonitorSendError { message, updates }
+        })
     }
 }

@@ -1,18 +1,58 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::ptr;
 
 use windows_sys::Win32::Devices::Display::{
-    DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
-    QueryDisplayConfig,
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo,
+    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
 
 use super::{MonitorError, wide_to_string, win32_status};
 
-pub(super) fn active_display_pnp_ids() -> Result<HashSet<String>, MonitorError> {
+#[derive(Default)]
+pub(super) struct ActiveDisplayPaths {
+    pnp_by_gdi_name: HashMap<String, String>,
+    pnp_ids: HashSet<String>,
+    pub(super) warnings: Vec<String>,
+}
+
+impl ActiveDisplayPaths {
+    pub(super) fn pnp_id_for_gdi_name(&self, gdi_name: &str) -> Option<&str> {
+        self.pnp_by_gdi_name
+            .get(&normalize_gdi_name(gdi_name))
+            .map(String::as_str)
+    }
+
+    pub(super) fn contains_pnp_id(&self, pnp_id: &str) -> bool {
+        self.pnp_ids.contains(pnp_id)
+    }
+}
+
+pub(super) fn active_display_paths() -> Result<ActiveDisplayPaths, MonitorError> {
+    let paths = query_active_paths()?;
+    let mut result = ActiveDisplayPaths::default();
+
+    for path in paths {
+        match active_display_path(path) {
+            Ok((gdi_name, pnp_id)) => {
+                result.pnp_ids.insert(pnp_id.clone());
+                result
+                    .pnp_by_gdi_name
+                    .insert(normalize_gdi_name(&gdi_name), pnp_id);
+            }
+            Err(error) => result
+                .warnings
+                .push(format!("failed to inspect active display path: {error}")),
+        }
+    }
+
+    Ok(result)
+}
+
+fn query_active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, MonitorError> {
     let flags = QDC_ONLY_ACTIVE_PATHS;
     let mut path_count = 0;
     let mut mode_count = 0;
@@ -45,13 +85,46 @@ pub(super) fn active_display_pnp_ids() -> Result<HashSet<String>, MonitorError> 
         }
 
         paths.truncate(path_count as usize);
-        return paths.into_iter().map(active_display_pnp_id).collect();
+        return Ok(paths);
     }
 
     Err(win32_status(
         "QueryDisplayConfig remained unstable",
         ERROR_INSUFFICIENT_BUFFER,
     ))
+}
+
+fn active_display_path(path: DISPLAYCONFIG_PATH_INFO) -> Result<(String, String), MonitorError> {
+    let gdi_name = active_display_gdi_name(path)?;
+    let pnp_id = active_display_pnp_id(path)?;
+    Ok((gdi_name, pnp_id))
+}
+
+fn active_display_gdi_name(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, MonitorError> {
+    let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+            size: mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+            adapterId: path.sourceInfo.adapterId,
+            id: path.sourceInfo.id,
+        },
+        ..Default::default()
+    };
+
+    let status = unsafe {
+        DisplayConfigGetDeviceInfo(&mut source_name.header as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER)
+    };
+    if status != ERROR_SUCCESS as i32 {
+        return Err(win32_status(
+            "DisplayConfigGetDeviceInfo source query failed",
+            status as u32,
+        ));
+    }
+
+    wide_to_string(&source_name.viewGdiDeviceName).ok_or_else(|| MonitorError::InvalidData {
+        context: "invalid active display source name",
+        details: format!("source id {}", path.sourceInfo.id),
+    })
 }
 
 fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, MonitorError> {
@@ -70,7 +143,7 @@ fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, Monito
     };
     if status != ERROR_SUCCESS as i32 {
         return Err(win32_status(
-            "DisplayConfigGetDeviceInfo failed",
+            "DisplayConfigGetDeviceInfo target query failed",
             status as u32,
         ));
     }
@@ -105,9 +178,13 @@ pub(super) fn normalize_pnp_id(value: &str) -> String {
     value.replace(['#', '/'], "\\").to_ascii_uppercase()
 }
 
+fn normalize_gdi_name(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalize_pnp_id, pnp_id_from_monitor_device_path};
+    use super::{normalize_gdi_name, normalize_pnp_id, pnp_id_from_monitor_device_path};
 
     #[test]
     fn monitor_device_paths_become_normalized_pnp_ids() {
@@ -120,5 +197,6 @@ mod tests {
             normalize_pnp_id("display#abc/instance"),
             r"DISPLAY\ABC\INSTANCE"
         );
+        assert_eq!(normalize_gdi_name(r"\\.\display1"), r"\\.\DISPLAY1");
     }
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use wmi::WMIConnection;
 
-use super::display_config::{active_display_pnp_ids, normalize_pnp_id};
+use super::display_config::{ActiveDisplayPaths, normalize_pnp_id};
 use super::{MonitorError, MonitorId};
 
 pub(super) struct WmiMonitor {
@@ -58,7 +58,7 @@ pub(super) struct WmiDiscovery {
     pub(super) warnings: Vec<String>,
 }
 
-pub(super) fn discover() -> Result<WmiDiscovery, MonitorError> {
+pub(super) fn discover(active_paths: &ActiveDisplayPaths) -> Result<WmiDiscovery, MonitorError> {
     let connection = wmi_connection("ROOT\\WMI")?;
     let brightness_monitors: Vec<WmiMonitorBrightness> = connection
         .raw_query(
@@ -75,7 +75,6 @@ pub(super) fn discover() -> Result<WmiDiscovery, MonitorError> {
         .filter(|monitor| monitor.Active)
         .map(|monitor| (monitor.InstanceName, monitor.path))
         .collect();
-    let active_pnp_ids = active_display_pnp_ids()?;
     let mut warnings = Vec::new();
     let friendly_names = match wmi_monitor_names(&connection) {
         Ok(names) => names,
@@ -111,7 +110,7 @@ pub(super) fn discover() -> Result<WmiDiscovery, MonitorError> {
             ));
             continue;
         };
-        if !active_pnp_ids.contains(&pnp_id) {
+        if !active_paths.contains_pnp_id(&pnp_id) {
             continue;
         }
 

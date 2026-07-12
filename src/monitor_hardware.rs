@@ -30,18 +30,21 @@ pub struct MonitorSnapshot {
 
 #[derive(Debug)]
 pub struct RefreshResult {
+    pub generation: u64,
     pub snapshots: Vec<MonitorSnapshot>,
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BrightnessUpdate {
+    pub generation: u64,
     pub id: MonitorId,
     pub value: i32,
 }
 
 #[derive(Debug)]
 pub struct ApplyOutcome {
+    pub generation: u64,
     pub id: MonitorId,
     pub requested: i32,
     pub effective: Option<i32>,
@@ -83,6 +86,7 @@ mod platform {
 
         pub fn refresh(&mut self) -> Result<RefreshResult, MonitorError> {
             Ok(RefreshResult {
+                generation: 0,
                 snapshots: Vec::new(),
                 warnings: Vec::new(),
             })
@@ -93,6 +97,7 @@ mod platform {
                 outcomes: updates
                     .into_iter()
                     .map(|update| ApplyOutcome {
+                        generation: update.generation,
                         id: update.id,
                         requested: update.value,
                         effective: None,

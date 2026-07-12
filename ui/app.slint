@@ -125,7 +125,9 @@ component BrightnessSlider inherits Rectangle {
         }
 
         moved => {
-            root.changed(root.position-to-value(touch.mouse-x - root.thumb-size / 2, root.track-width));
+            if touch.pressed {
+                root.changed(root.position-to-value(touch.mouse-x - root.thumb-size / 2, root.track-width));
+            }
         }
     }
 
@@ -223,6 +225,7 @@ component IconButton inherits Rectangle {
     in property <string> symbol;
     in property <string> accessible-name;
     in property <bool> checkable: false;
+    in property <bool> enabled: true;
     in property <length> icon-x: 0px;
     in property <length> icon-y: 0px;
     in-out property <bool> checked;
@@ -236,6 +239,7 @@ component IconButton inherits Rectangle {
         height: parent.height;
         text: "";
         accessible-label: root.accessible-name;
+        enabled: root.enabled;
         checkable: root.checkable;
         checked <=> root.checked;
 
@@ -281,6 +285,7 @@ export component MainWindow inherits Window {
     in-out property <bool> dark-mode <=> AppPalette.dark-mode;
     in property <bool> has-monitors;
     in property <bool> refreshing;
+    in property <bool> theme-changing;
     in property <string> status-message;
     in property <length> body-height: PopupMetrics.empty-body-height;
 
@@ -415,6 +420,7 @@ export component MainWindow inherits Window {
                     IconButton {
                         symbol: root.dark-mode ? "\u{e706}" : "\u{e708}";
                         accessible-name: root.dark-mode ? "Switch to light mode" : "Switch to dark mode";
+                        enabled: !root.theme-changing;
                         icon-x: 1px;
 
                         clicked => {
@@ -425,6 +431,7 @@ export component MainWindow inherits Window {
                     IconButton {
                         symbol: "\u{e72c}";
                         accessible-name: "Refresh monitors";
+                        enabled: !root.refreshing;
                         icon-x: 1px;
                         icon-y: 1px;
 

@@ -3,12 +3,13 @@
 mod monitor_hardware;
 mod monitor_state;
 mod monitor_worker;
+mod theme_worker;
 mod windows_integration;
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::sync::mpsc::TryRecvError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
@@ -20,10 +21,12 @@ use slint::{
 use monitor_hardware::{ApplyReport, RefreshResult};
 use monitor_state::{MonitorState, brightness_after_scroll};
 use monitor_worker::{MonitorEvent, MonitorWorker};
+use theme_worker::{ThemeEvent, ThemeWorker};
 
 slint::include_modules!();
 
 const POPUP_MARGIN: i32 = 12;
+const TRAY_REOPEN_SUPPRESSION: Duration = Duration::from_millis(250);
 const POPUP_POSITION_CORRECTION_DELAYS_MS: [u64; 3] = [0, 50, 200];
 const APP_ICON_ICO: &[u8] = include_bytes!("../assets/app.ico");
 const TRAY_ICON_LIGHT_ICO: &[u8] = include_bytes!("../assets/tray-light.ico");
@@ -50,19 +53,24 @@ struct AppController {
     popup: RefCell<Option<MainWindow>>,
     monitor_state: RefCell<MonitorState>,
     monitor_worker: MonitorWorker,
+    theme_worker: ThemeWorker,
     apply_timer: Timer,
     monitor_event_timer: Timer,
+    theme_event_timer: Timer,
     outside_click_timer: Timer,
     next_request_id: Cell<u64>,
     latest_refresh_id: Cell<u64>,
+    refresh_requests: Cell<RefreshRequestState>,
     pending_worker_requests: Cell<usize>,
+    theme_change_in_flight: Cell<bool>,
     dark_mode: Cell<bool>,
     tray: TrayIcon,
     app_icon: Image,
     tray_light_icon: Image,
     tray_dark_icon: Image,
-    left_button_was_down: Cell<bool>,
-    click_started_inside_popup: Cell<bool>,
+    mouse_watcher: windows_integration::GlobalMouseWatcher,
+    click_started_outside_popup: Cell<bool>,
+    last_outside_hide: Cell<Option<Instant>>,
 }
 
 impl AppController {
@@ -82,19 +90,24 @@ impl AppController {
             popup: RefCell::new(None),
             monitor_state: RefCell::new(MonitorState::new()),
             monitor_worker: MonitorWorker::new(),
+            theme_worker: ThemeWorker::new(),
             apply_timer: Timer::default(),
             monitor_event_timer: Timer::default(),
+            theme_event_timer: Timer::default(),
             outside_click_timer: Timer::default(),
             next_request_id: Cell::new(1),
             latest_refresh_id: Cell::new(0),
+            refresh_requests: Cell::new(RefreshRequestState::default()),
             pending_worker_requests: Cell::new(0),
+            theme_change_in_flight: Cell::new(false),
             dark_mode: Cell::new(initial_dark_mode),
             tray,
             app_icon,
             tray_light_icon,
             tray_dark_icon,
-            left_button_was_down: Cell::new(windows_integration::left_mouse_button_down()),
-            click_started_inside_popup: Cell::new(false),
+            mouse_watcher: windows_integration::GlobalMouseWatcher::new(),
+            click_started_outside_popup: Cell::new(false),
+            last_outside_hide: Cell::new(None),
         });
         app.install_handlers();
         Ok(app)
@@ -107,11 +120,13 @@ impl AppController {
                 return;
             };
 
+            app.poll_outside_click();
+            if app.consume_recent_outside_hide() {
+                return;
+            }
             if let Err(error) = app.toggle_popup() {
                 eprintln!("failed to toggle popup: {error}");
             }
-            app.left_button_was_down
-                .set(windows_integration::left_mouse_button_down());
         });
 
         self.tray.on_quit_requested(|| {
@@ -131,6 +146,7 @@ impl AppController {
         popup.set_has_monitors(state.has_monitors());
         popup.set_dark_mode(self.dark_mode.get());
         popup.set_refreshing(false);
+        popup.set_theme_changing(false);
         popup.set_status_message(SharedString::default());
         drop(state);
         let app = Rc::downgrade(self);
@@ -242,17 +258,37 @@ impl AppController {
     }
 
     fn request_refresh(self: &Rc<Self>) {
+        let mut requests = self.refresh_requests.get();
+        if !requests.request() {
+            self.refresh_requests.set(requests);
+            return;
+        }
+        self.refresh_requests.set(requests);
+
+        self.start_refresh();
+    }
+
+    fn start_refresh(self: &Rc<Self>) {
         self.apply_timer.stop();
-        self.monitor_state.borrow_mut().discard_pending();
+        let updates = self.monitor_state.borrow_mut().take_pending();
         self.set_refreshing(true);
         self.set_status_message("");
 
         let request_id = self.next_request_id();
         self.latest_refresh_id.set(request_id);
-        match self.monitor_worker.refresh(request_id) {
+        let queued = if updates.is_empty() {
+            self.monitor_worker.refresh(request_id)
+        } else {
+            self.monitor_worker.apply_then_refresh(request_id, updates)
+        };
+        match queued {
             Ok(()) => self.track_worker_request(),
             Err(error) => {
-                eprintln!("failed to queue monitor refresh: {error}");
+                eprintln!("failed to queue monitor refresh: {}", error.message);
+                self.monitor_state
+                    .borrow_mut()
+                    .restore_unsent(&error.updates);
+                self.refresh_requests.set(RefreshRequestState::default());
                 self.set_refreshing(false);
                 self.set_status_message("Couldn't refresh monitors.");
             }
@@ -264,7 +300,10 @@ impl AppController {
         match self.monitor_worker.apply(request_id, updates) {
             Ok(()) => self.track_worker_request(),
             Err(error) => {
-                eprintln!("failed to queue brightness update: {error}");
+                eprintln!("failed to queue brightness update: {}", error.message);
+                self.monitor_state
+                    .borrow_mut()
+                    .restore_unsent(&error.updates);
                 self.set_status_message("Couldn't change brightness.");
             }
         }
@@ -295,8 +334,12 @@ impl AppController {
     fn poll_monitor_events(self: &Rc<Self>) {
         loop {
             match self.monitor_worker.try_recv() {
-                Ok(MonitorEvent::Refreshed { request_id, result }) => {
-                    self.handle_refresh_result(request_id, result);
+                Ok(MonitorEvent::Refreshed {
+                    request_id,
+                    apply_report,
+                    result,
+                }) => {
+                    self.handle_refresh_result(request_id, apply_report, result);
                     self.finish_worker_request();
                 }
                 Ok(MonitorEvent::Applied { request_id, report }) => {
@@ -309,6 +352,7 @@ impl AppController {
                     eprintln!("monitor worker disconnected");
                     self.pending_worker_requests.set(0);
                     self.monitor_event_timer.stop();
+                    self.refresh_requests.set(RefreshRequestState::default());
                     self.set_refreshing(false);
                     self.set_status_message("Monitor service stopped.");
                     break;
@@ -317,12 +361,19 @@ impl AppController {
         }
     }
 
-    fn handle_refresh_result(&self, request_id: u64, result: Result<RefreshResult, String>) {
+    fn handle_refresh_result(
+        self: &Rc<Self>,
+        request_id: u64,
+        apply_report: Option<ApplyReport>,
+        result: Result<RefreshResult, String>,
+    ) {
         if request_id != self.latest_refresh_id.get() {
             return;
         }
 
-        self.set_refreshing(false);
+        if let Some(report) = apply_report {
+            self.handle_apply_report(report);
+        }
         match result {
             Ok(result) => {
                 let has_warnings = !result.warnings.is_empty();
@@ -331,7 +382,7 @@ impl AppController {
                 }
                 self.monitor_state
                     .borrow_mut()
-                    .replace_snapshots(result.snapshots);
+                    .replace_snapshots(result.generation, result.snapshots);
                 self.set_status_message(if has_warnings {
                     "Some monitors couldn't be refreshed."
                 } else {
@@ -351,6 +402,15 @@ impl AppController {
                 stabilize_popup_position(popup, popup_height);
             }
         });
+
+        let mut requests = self.refresh_requests.get();
+        let refresh_again = requests.complete();
+        self.refresh_requests.set(requests);
+        if refresh_again {
+            self.start_refresh();
+        } else {
+            self.set_refreshing(false);
+        }
     }
 
     fn handle_apply_report(&self, report: ApplyReport) {
@@ -384,17 +444,55 @@ impl AppController {
         self.with_popup(|popup| popup.set_refreshing(refreshing));
     }
 
-    fn toggle_windows_theme(&self) {
-        let next_dark_mode = windows_integration::next_windows_dark_mode();
-
-        match windows_integration::set_windows_dark_mode(next_dark_mode) {
-            Ok(()) => {
-                self.dark_mode.set(next_dark_mode);
-                self.update_tray_icon(next_dark_mode);
-                self.with_popup(|popup| popup.set_dark_mode(next_dark_mode));
-            }
-            Err(error) => eprintln!("failed to change Windows theme: {error}"),
+    fn toggle_windows_theme(self: &Rc<Self>) {
+        if self.theme_change_in_flight.replace(true) {
+            return;
         }
+        self.with_popup(|popup| popup.set_theme_changing(true));
+        self.set_status_message("");
+
+        if let Err(error) = self.theme_worker.toggle() {
+            eprintln!("failed to queue Windows theme change: {error}");
+            self.finish_theme_change();
+            self.set_status_message("Couldn't change Windows theme.");
+            return;
+        }
+
+        let app = Rc::downgrade(self);
+        self.theme_event_timer
+            .start(TimerMode::Repeated, Duration::from_millis(25), move || {
+                if let Some(app) = app.upgrade() {
+                    app.poll_theme_events();
+                }
+            });
+    }
+
+    fn poll_theme_events(&self) {
+        match self.theme_worker.try_recv() {
+            Ok(ThemeEvent::Toggled(Ok(dark_mode))) => {
+                self.dark_mode.set(dark_mode);
+                self.update_tray_icon(dark_mode);
+                self.with_popup(|popup| popup.set_dark_mode(dark_mode));
+                self.finish_theme_change();
+            }
+            Ok(ThemeEvent::Toggled(Err(error))) => {
+                eprintln!("failed to change Windows theme: {error}");
+                self.finish_theme_change();
+                self.set_status_message("Couldn't change Windows theme.");
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                eprintln!("theme worker disconnected");
+                self.finish_theme_change();
+                self.set_status_message("Theme service stopped.");
+            }
+        }
+    }
+
+    fn finish_theme_change(&self) {
+        self.theme_change_in_flight.set(false);
+        self.theme_event_timer.stop();
+        self.with_popup(|popup| popup.set_theme_changing(false));
     }
 
     fn update_tray_icon(&self, dark_mode: bool) {
@@ -406,13 +504,13 @@ impl AppController {
     }
 
     fn start_outside_click_watcher(self: &Rc<Self>) {
-        self.left_button_was_down
-            .set(windows_integration::left_mouse_button_down());
-        self.click_started_inside_popup.set(false);
+        self.mouse_watcher.drain();
+        self.click_started_outside_popup.set(false);
+        self.last_outside_hide.set(None);
 
         let app = Rc::downgrade(self);
         self.outside_click_timer
-            .start(TimerMode::Repeated, Duration::from_millis(50), move || {
+            .start(TimerMode::Repeated, Duration::from_millis(16), move || {
                 if let Some(app) = app.upgrade() {
                     app.poll_outside_click();
                 }
@@ -421,7 +519,7 @@ impl AppController {
 
     fn stop_outside_click_watcher(&self) {
         self.outside_click_timer.stop();
-        self.click_started_inside_popup.set(false);
+        self.click_started_outside_popup.set(false);
     }
 
     fn hide_popup(&self, popup: &MainWindow) {
@@ -430,38 +528,77 @@ impl AppController {
     }
 
     fn poll_outside_click(&self) {
-        let left_button_is_down = windows_integration::left_mouse_button_down();
-        let left_button_went_down = left_button_is_down && !self.left_button_was_down.get();
-        let left_button_went_up = !left_button_is_down && self.left_button_was_down.get();
-
         let popup_ref = self.popup.borrow();
         let Some(popup) = popup_ref.as_ref() else {
             self.stop_outside_click_watcher();
+            self.mouse_watcher.drain();
             return;
         };
         if !popup.window().is_visible() {
             self.stop_outside_click_watcher();
+            self.mouse_watcher.drain();
             return;
         }
 
-        if left_button_went_down {
-            self.click_started_inside_popup
-                .set(cursor_is_inside_popup(popup));
+        while let Ok(event) = self.mouse_watcher.try_recv() {
+            match event {
+                windows_integration::GlobalMouseEvent::LeftDown { x, y } => {
+                    self.click_started_outside_popup
+                        .set(!point_is_inside_popup(popup, x, y));
+                }
+                windows_integration::GlobalMouseEvent::LeftUp { x, y } => {
+                    let should_hide = self.click_started_outside_popup.replace(false)
+                        && !point_is_inside_popup(popup, x, y);
+                    if should_hide {
+                        self.hide_popup(popup);
+                        self.last_outside_hide.set(Some(Instant::now()));
+                        break;
+                    }
+                }
+            }
         }
+    }
 
-        if left_button_went_up
-            && !self.click_started_inside_popup.get()
-            && !cursor_is_inside_popup(popup)
-        {
-            self.hide_popup(popup);
-        }
-
-        self.left_button_was_down.set(left_button_is_down);
+    fn consume_recent_outside_hide(&self) -> bool {
+        let recent = self
+            .last_outside_hide
+            .get()
+            .is_some_and(|hidden_at| hidden_at.elapsed() <= TRAY_REOPEN_SUPPRESSION);
+        self.last_outside_hide.set(None);
+        recent
     }
 
     fn with_popup(&self, action: impl FnOnce(&MainWindow)) {
         if let Some(popup) = self.popup.borrow().as_ref() {
             action(popup);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct RefreshRequestState {
+    in_flight: bool,
+    again: bool,
+}
+
+impl RefreshRequestState {
+    fn request(&mut self) -> bool {
+        if self.in_flight {
+            self.again = true;
+            false
+        } else {
+            self.in_flight = true;
+            true
+        }
+    }
+
+    fn complete(&mut self) -> bool {
+        if self.again {
+            self.again = false;
+            true
+        } else {
+            self.in_flight = false;
+            false
         }
     }
 }
@@ -581,16 +718,14 @@ fn clamp_to_work_area(value: i32, start: i32, end: i32, size: i32) -> i32 {
     }
 }
 
-fn cursor_is_inside_popup(popup: &MainWindow) -> bool {
+fn point_is_inside_popup(popup: &MainWindow, x: i32, y: i32) -> bool {
     let position = popup.window().position();
     let size = popup.window().size();
 
-    windows_integration::cursor_is_in_rect(
-        position.x,
-        position.y,
-        position.x + size.width as i32,
-        position.y + size.height as i32,
-    )
+    x >= position.x
+        && x < position.x + size.width as i32
+        && y >= position.y
+        && y < position.y + size.height as i32
 }
 
 fn build_icon(icon_data: &'static [u8]) -> Image {
@@ -608,7 +743,9 @@ fn tray_icon_for_dark_mode(dark_mode: bool, light_icon: &Image, dark_icon: &Imag
 
 #[cfg(test)]
 mod tests {
-    use super::{PopupLayoutMetrics, clamp_to_work_area, popup_height_for_monitor_count};
+    use super::{
+        PopupLayoutMetrics, RefreshRequestState, clamp_to_work_area, popup_height_for_monitor_count,
+    };
 
     fn popup_metrics() -> PopupLayoutMetrics {
         PopupLayoutMetrics {
@@ -637,5 +774,16 @@ mod tests {
         assert_eq!(clamp_to_work_area(900, 0, 1000, 100), 888);
         assert_eq!(clamp_to_work_area(-50, 0, 1000, 100), 12);
         assert_eq!(clamp_to_work_area(400, 0, 1000, 100), 400);
+    }
+
+    #[test]
+    fn repeated_refresh_requests_coalesce_into_one_follow_up() {
+        let mut requests = RefreshRequestState::default();
+        assert!(requests.request());
+        assert!(!requests.request());
+        assert!(!requests.request());
+        assert!(requests.complete());
+        assert!(!requests.complete());
+        assert!(requests.request());
     }
 }

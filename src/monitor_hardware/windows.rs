@@ -26,6 +26,10 @@ pub enum MonitorError {
         context: &'static str,
         details: String,
     },
+    StaleGeneration {
+        requested: u64,
+        current: u64,
+    },
     UnknownMonitor(MonitorId),
 }
 
@@ -46,6 +50,10 @@ impl fmt::Display for MonitorError {
             }
             Self::Wmi { context, details } => write!(formatter, "{context}: {details}"),
             Self::InvalidData { context, details } => write!(formatter, "{context}: {details}"),
+            Self::StaleGeneration { requested, current } => write!(
+                formatter,
+                "stale monitor generation {requested}; current generation is {current}"
+            ),
             Self::UnknownMonitor(id) => write!(formatter, "unknown monitor id {id}"),
         }
     }
@@ -90,31 +98,48 @@ impl Monitor {
 
 pub struct MonitorController {
     monitors: Vec<Monitor>,
+    generation: u64,
 }
 
 impl MonitorController {
     pub fn new() -> Self {
         Self {
             monitors: Vec::new(),
+            generation: 0,
         }
     }
 
     pub fn refresh(&mut self) -> Result<RefreshResult, MonitorError> {
-        let mut monitors = ddc::discover()?
+        let mut warnings = Vec::new();
+        let (active_paths, active_paths_complete) = match display_config::active_display_paths() {
+            Ok(paths) => (paths, true),
+            Err(error) => {
+                warnings.push(format!("failed to query active display paths: {error}"));
+                (display_config::ActiveDisplayPaths::default(), false)
+            }
+        };
+        warnings.extend(active_paths.warnings.iter().cloned());
+
+        let ddc_discovery = ddc::discover(&active_paths)?;
+        warnings.extend(ddc_discovery.warnings);
+        let mut monitors = ddc_discovery
+            .monitors
             .into_iter()
             .map(|monitor| Monitor::Ddc(Box::new(monitor)))
             .collect::<Vec<_>>();
 
-        let mut warnings = Vec::new();
-        match wmi::discover() {
-            Ok(discovery) => {
-                warnings.extend(discovery.warnings);
-                monitors.extend(discovery.monitors.into_iter().map(Monitor::Wmi));
+        if active_paths_complete {
+            match wmi::discover(&active_paths) {
+                Ok(discovery) => {
+                    warnings.extend(discovery.warnings);
+                    monitors.extend(discovery.monitors.into_iter().map(Monitor::Wmi));
+                }
+                Err(error) => warnings.push(format!("failed to refresh WMI monitors: {error}")),
             }
-            Err(error) => warnings.push(format!("failed to refresh WMI monitors: {error}")),
         }
 
         self.monitors = monitors;
+        self.generation = self.generation.wrapping_add(1).max(1);
         let snapshots = self
             .monitors
             .iter()
@@ -126,6 +151,7 @@ impl MonitorController {
             .collect();
 
         Ok(RefreshResult {
+            generation: self.generation,
             snapshots,
             warnings,
         })
@@ -136,6 +162,21 @@ impl MonitorController {
             .into_iter()
             .map(|update| {
                 let requested = update.value.clamp(0, 100);
+                if update.generation != self.generation {
+                    return ApplyOutcome {
+                        generation: update.generation,
+                        id: update.id,
+                        requested,
+                        effective: None,
+                        error: Some(
+                            MonitorError::StaleGeneration {
+                                requested: update.generation,
+                                current: self.generation,
+                            }
+                            .to_string(),
+                        ),
+                    };
+                }
                 let Some(monitor) = self
                     .monitors
                     .iter_mut()
@@ -143,6 +184,7 @@ impl MonitorController {
                 else {
                     let error = MonitorError::UnknownMonitor(update.id.clone()).to_string();
                     return ApplyOutcome {
+                        generation: update.generation,
                         id: update.id,
                         requested,
                         effective: None,
@@ -157,6 +199,7 @@ impl MonitorController {
                     .map(|error| error.to_string());
 
                 ApplyOutcome {
+                    generation: update.generation,
                     id: update.id,
                     requested,
                     effective: Some(if error.is_some() { previous } else { requested }),

@@ -5,13 +5,21 @@ use windows_sys::Win32::Devices::Display::{
     DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
     GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
 };
-use windows_sys::Win32::Foundation::{LPARAM, RECT};
+use windows_sys::Win32::Foundation::{
+    ERROR_GEN_FAILURE, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, GetLastError, LPARAM, RECT,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
 use windows_sys::core::BOOL;
 
+use super::display_config::ActiveDisplayPaths;
 use super::{MonitorError, MonitorId, last_win32_error, wide_to_string};
+
+pub(super) struct DdcDiscovery {
+    pub(super) monitors: Vec<DdcMonitor>,
+    pub(super) warnings: Vec<String>,
+}
 
 pub(super) struct DdcMonitor {
     id: MonitorId,
@@ -75,15 +83,18 @@ impl Drop for PhysicalMonitorHandle {
     }
 }
 
-pub(super) fn discover() -> Result<Vec<DdcMonitor>, MonitorError> {
+pub(super) fn discover(paths: &ActiveDisplayPaths) -> Result<DdcDiscovery, MonitorError> {
     let hmonitors = enumerate_display_monitors()?;
     let mut monitors = Vec::new();
+    let mut warnings = Vec::new();
 
     for hmonitor in hmonitors {
-        monitors.extend(discover_physical_monitors(hmonitor));
+        let discovery = discover_physical_monitors(hmonitor, paths);
+        monitors.extend(discovery.monitors);
+        warnings.extend(discovery.warnings);
     }
 
-    Ok(monitors)
+    Ok(DdcDiscovery { monitors, warnings })
 }
 
 fn enumerate_display_monitors() -> Result<Vec<HMONITOR>, MonitorError> {
@@ -104,36 +115,55 @@ fn enumerate_display_monitors() -> Result<Vec<HMONITOR>, MonitorError> {
     }
 }
 
-fn discover_physical_monitors(hmonitor: HMONITOR) -> Vec<DdcMonitor> {
+fn discover_physical_monitors(hmonitor: HMONITOR, paths: &ActiveDisplayPaths) -> DdcDiscovery {
+    let display_name = display_name(hmonitor).unwrap_or_else(|| "UNKNOWN-DISPLAY".into());
+    let pnp_id = paths.pnp_id_for_gdi_name(&display_name);
     let mut count = 0;
     let ok = unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count) };
-    if ok == 0 || count == 0 {
-        return Vec::new();
+    if ok == 0 {
+        let error = last_win32_error("GetNumberOfPhysicalMonitorsFromHMONITOR failed");
+        return DdcDiscovery {
+            monitors: Vec::new(),
+            warnings: vec![format!("failed to inspect {display_name}: {error}")],
+        };
+    }
+    if count == 0 {
+        return DdcDiscovery {
+            monitors: Vec::new(),
+            warnings: Vec::new(),
+        };
     }
 
     let mut physical_monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
     let ok =
         unsafe { GetPhysicalMonitorsFromHMONITOR(hmonitor, count, physical_monitors.as_mut_ptr()) };
     if ok == 0 {
-        return Vec::new();
+        let error = last_win32_error("GetPhysicalMonitorsFromHMONITOR failed");
+        return DdcDiscovery {
+            monitors: Vec::new(),
+            warnings: vec![format!("failed to inspect {display_name}: {error}")],
+        };
     }
 
-    let display_name = display_name(hmonitor).unwrap_or_else(|| "UNKNOWN-DISPLAY".into());
+    let mut monitors = Vec::new();
+    let mut warnings = Vec::new();
+    for (index, physical_monitor) in physical_monitors.into_iter().enumerate() {
+        match build_monitor(&display_name, pnp_id, index, physical_monitor) {
+            Ok(Some(monitor)) => monitors.push(monitor),
+            Ok(None) => {}
+            Err(error) => warnings.push(format!("failed to inspect {display_name}: {error}")),
+        }
+    }
 
-    physical_monitors
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, physical_monitor)| {
-            build_monitor(&display_name, index, physical_monitor)
-        })
-        .collect()
+    DdcDiscovery { monitors, warnings }
 }
 
 fn build_monitor(
     display_name: &str,
+    pnp_id: Option<&str>,
     physical_index: usize,
     physical_monitor: PHYSICAL_MONITOR,
-) -> Option<DdcMonitor> {
+) -> Result<Option<DdcMonitor>, MonitorError> {
     let physical_monitor = PhysicalMonitorHandle::new(physical_monitor);
     let mut min = 0;
     let mut current = 0;
@@ -142,26 +172,45 @@ fn build_monitor(
         GetMonitorBrightness(physical_monitor.handle(), &mut min, &mut current, &mut max)
     };
 
-    if ok == 0 || max <= min {
-        return None;
+    if ok == 0 {
+        let code = unsafe { GetLastError() };
+        if matches!(
+            code,
+            ERROR_INVALID_FUNCTION | ERROR_GEN_FAILURE | ERROR_NOT_SUPPORTED
+        ) {
+            return Ok(None);
+        }
+        return Err(MonitorError::Win32 {
+            context: "GetMonitorBrightness failed",
+            code,
+        });
+    }
+    if max <= min {
+        return Err(MonitorError::InvalidData {
+            context: "invalid DDC brightness range",
+            details: format!("minimum {min}, maximum {max}"),
+        });
     }
 
     let description = physical_monitor.description();
     let name = wide_to_string(&description).unwrap_or_else(|| display_name.to_string());
-    let id = MonitorId::new(format!(
-        "ddc:{}:{physical_index}:{}",
-        display_name.to_ascii_uppercase(),
-        name.to_ascii_uppercase()
-    ));
+    let id = MonitorId::new(match pnp_id {
+        Some(pnp_id) => format!("ddc:{pnp_id}:{physical_index}"),
+        None => format!(
+            "ddc-gdi:{}:{physical_index}:{}",
+            display_name.to_ascii_uppercase(),
+            name.to_ascii_uppercase()
+        ),
+    });
 
-    Some(DdcMonitor {
+    Ok(Some(DdcMonitor {
         id,
         name,
         brightness: raw_to_percent(current, min, max),
         physical_monitor,
         min,
         max,
-    })
+    }))
 }
 
 unsafe extern "system" fn enum_monitor(
