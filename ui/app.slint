@@ -9,6 +9,7 @@ global AppPalette {
     out property <brush> divider: dark-mode ? #3a3a3a : #d0d0d0;
     out property <brush> tick: dark-mode ? #FFFFFF14 : #00000073;
     out property <brush> checked-foreground: #ffffff;
+    out property <brush> error-foreground: dark-mode ? #ffb4ab : #b3261e;
 }
 
 export global PopupMetrics {
@@ -28,7 +29,7 @@ export global PopupMetrics {
 }
 
 export struct MonitorEntry {
-    id: int,
+    id: string,
     name: string,
     brightness: int,
 }
@@ -142,7 +143,7 @@ component BrightnessSlider inherits Rectangle {
 }
 
 component MonitorRow inherits Rectangle {
-    in property <int> monitor-id;
+    in property <string> monitor-id;
     in property <string> name;
     in property <int> brightness;
 
@@ -263,10 +264,11 @@ export component MainWindow inherits Window {
     in-out property <bool> sync-all;
     in-out property <bool> dark-mode <=> AppPalette.dark-mode;
     in property <bool> has-monitors;
+    in property <string> status-message;
     in property <length> body-height: PopupMetrics.empty-body-height;
 
-    callback brightness-changed(int, float);
-    callback brightness-scrolled(int, int);
+    callback brightness-changed(string, float);
+    callback brightness-scrolled(string, int);
     callback refresh-requested();
     callback theme-toggle-requested();
 
@@ -364,8 +366,17 @@ export component MainWindow inherits Window {
                     spacing: 8px;
 
                     Rectangle {
-                        background: transparent;
                         horizontal-stretch: 1;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.status-message;
+                            color: AppPalette.error-foreground;
+                            font-size: 12px;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
                     }
 
                     IconButton {

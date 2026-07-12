@@ -45,10 +45,7 @@ pub(super) fn active_display_pnp_ids() -> Result<HashSet<String>, MonitorError> 
         }
 
         paths.truncate(path_count as usize);
-        return Ok(paths
-            .into_iter()
-            .filter_map(active_display_pnp_id)
-            .collect());
+        return paths.into_iter().map(active_display_pnp_id).collect();
     }
 
     Err(win32_status(
@@ -57,7 +54,7 @@ pub(super) fn active_display_pnp_ids() -> Result<HashSet<String>, MonitorError> 
     ))
 }
 
-fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, MonitorError> {
     let mut target_name = DISPLAYCONFIG_TARGET_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
             r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
@@ -72,11 +69,18 @@ fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Option<String> {
         DisplayConfigGetDeviceInfo(&mut target_name.header as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER)
     };
     if status != ERROR_SUCCESS as i32 {
-        return None;
+        return Err(win32_status(
+            "DisplayConfigGetDeviceInfo failed",
+            status as u32,
+        ));
     }
 
     wide_to_string(&target_name.monitorDevicePath)
         .and_then(|path| pnp_id_from_monitor_device_path(&path))
+        .ok_or_else(|| MonitorError::InvalidData {
+            context: "invalid active monitor device path",
+            details: format!("target id {}", path.targetInfo.id),
+        })
 }
 
 fn pnp_id_from_monitor_device_path(path: &str) -> Option<String> {

@@ -11,9 +11,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::core::BOOL;
 
-use super::{MonitorError, last_win32_error, wide_to_string};
+use super::{MonitorError, MonitorId, last_win32_error, wide_to_string};
 
 pub(super) struct DdcMonitor {
+    id: MonitorId,
     name: String,
     brightness: i32,
     physical_monitor: PhysicalMonitorHandle,
@@ -22,6 +23,10 @@ pub(super) struct DdcMonitor {
 }
 
 impl DdcMonitor {
+    pub(super) fn id(&self) -> &MonitorId {
+        &self.id
+    }
+
     pub(super) fn name(&self) -> &str {
         &self.name
     }
@@ -113,13 +118,22 @@ fn discover_physical_monitors(hmonitor: HMONITOR) -> Vec<DdcMonitor> {
         return Vec::new();
     }
 
+    let display_name = display_name(hmonitor).unwrap_or_else(|| "UNKNOWN-DISPLAY".into());
+
     physical_monitors
         .into_iter()
-        .filter_map(|physical_monitor| build_monitor(hmonitor, physical_monitor))
+        .enumerate()
+        .filter_map(|(index, physical_monitor)| {
+            build_monitor(&display_name, index, physical_monitor)
+        })
         .collect()
 }
 
-fn build_monitor(hmonitor: HMONITOR, physical_monitor: PHYSICAL_MONITOR) -> Option<DdcMonitor> {
+fn build_monitor(
+    display_name: &str,
+    physical_index: usize,
+    physical_monitor: PHYSICAL_MONITOR,
+) -> Option<DdcMonitor> {
     let physical_monitor = PhysicalMonitorHandle::new(physical_monitor);
     let mut min = 0;
     let mut current = 0;
@@ -133,11 +147,15 @@ fn build_monitor(hmonitor: HMONITOR, physical_monitor: PHYSICAL_MONITOR) -> Opti
     }
 
     let description = physical_monitor.description();
-    let name = wide_to_string(&description)
-        .or_else(|| display_name(hmonitor))
-        .unwrap_or_else(|| "Monitor".into());
+    let name = wide_to_string(&description).unwrap_or_else(|| display_name.to_string());
+    let id = MonitorId::new(format!(
+        "ddc:{}:{physical_index}:{}",
+        display_name.to_ascii_uppercase(),
+        name.to_ascii_uppercase()
+    ));
 
     Some(DdcMonitor {
+        id,
         name,
         brightness: raw_to_percent(current, min, max),
         physical_monitor,

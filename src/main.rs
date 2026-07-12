@@ -2,20 +2,24 @@
 
 mod monitor_hardware;
 mod monitor_state;
+mod monitor_worker;
 mod windows_integration;
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
+use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 #[cfg(windows)]
 use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
 use slint::{
-    CloseRequestResponse, ComponentHandle, Image, LogicalSize, ModelRc, PhysicalPosition, Timer,
-    TimerMode,
+    CloseRequestResponse, ComponentHandle, Image, LogicalSize, ModelRc, PhysicalPosition,
+    SharedString, Timer, TimerMode,
 };
 
+use monitor_hardware::{ApplyReport, RefreshResult};
 use monitor_state::{MonitorState, brightness_after_scroll};
+use monitor_worker::{MonitorEvent, MonitorWorker};
 
 slint::include_modules!();
 
@@ -45,8 +49,13 @@ fn main() -> Result<(), slint::PlatformError> {
 struct AppController {
     popup: RefCell<Option<MainWindow>>,
     monitor_state: RefCell<MonitorState>,
+    monitor_worker: MonitorWorker,
     apply_timer: Timer,
+    monitor_event_timer: Timer,
     outside_click_timer: Timer,
+    next_request_id: Cell<u64>,
+    latest_refresh_id: Cell<u64>,
+    pending_worker_requests: Cell<usize>,
     dark_mode: Cell<bool>,
     tray: TrayIcon,
     app_icon: Image,
@@ -72,8 +81,13 @@ impl AppController {
         let app = Rc::new(Self {
             popup: RefCell::new(None),
             monitor_state: RefCell::new(MonitorState::new()),
+            monitor_worker: MonitorWorker::new(),
             apply_timer: Timer::default(),
+            monitor_event_timer: Timer::default(),
             outside_click_timer: Timer::default(),
+            next_request_id: Cell::new(1),
+            latest_refresh_id: Cell::new(0),
+            pending_worker_requests: Cell::new(0),
             dark_mode: Cell::new(initial_dark_mode),
             tray,
             app_icon,
@@ -116,6 +130,7 @@ impl AppController {
         popup.set_monitors(ModelRc::new(state.model()));
         popup.set_has_monitors(state.has_monitors());
         popup.set_dark_mode(self.dark_mode.get());
+        popup.set_status_message(SharedString::default());
         drop(state);
         let app = Rc::downgrade(self);
         popup.window().on_close_requested(move || {
@@ -142,9 +157,7 @@ impl AppController {
         let app = Rc::downgrade(self);
         popup.on_refresh_requested(move || {
             if let Some(app) = app.upgrade() {
-                app.with_popup(|popup| {
-                    app.refresh_popup(popup);
-                });
+                app.request_refresh();
             }
         });
 
@@ -175,15 +188,16 @@ impl AppController {
         popup.set_dark_mode(current_dark_mode);
         self.update_tray_icon(current_dark_mode);
 
-        let popup_height = self.refresh_popup(popup);
+        let popup_height = self.resize_popup_from_state(popup);
         popup.show()?;
         position_popup(popup, popup_height);
         stabilize_popup_position(popup, popup_height);
         self.start_outside_click_watcher();
+        self.request_refresh();
         Ok(())
     }
 
-    fn update_brightness(self: &Rc<Self>, monitor_id: i32, value: i32) {
+    fn update_brightness(self: &Rc<Self>, monitor_id: SharedString, value: i32) {
         let sync_all = self
             .popup
             .borrow()
@@ -191,18 +205,18 @@ impl AppController {
             .is_some_and(MainWindow::get_sync_all);
         let has_monitors = {
             let mut state = self.monitor_state.borrow_mut();
-            state.update_brightness(monitor_id, value, sync_all);
+            state.update_brightness(monitor_id.as_str(), value, sync_all);
             state.has_monitors()
         };
         self.with_popup(|popup| popup.set_has_monitors(has_monitors));
         self.schedule_apply();
     }
 
-    fn scroll_brightness(self: &Rc<Self>, monitor_id: i32, delta: i32) {
+    fn scroll_brightness(self: &Rc<Self>, monitor_id: SharedString, delta: i32) {
         let current = self
             .monitor_state
             .borrow()
-            .brightness_for_monitor(monitor_id)
+            .brightness_for_monitor(monitor_id.as_str())
             .unwrap_or(50);
         self.update_brightness(monitor_id, brightness_after_scroll(current, delta));
     }
@@ -212,20 +226,153 @@ impl AppController {
         self.apply_timer
             .start(TimerMode::SingleShot, Duration::from_secs(1), move || {
                 if let Some(app) = app.upgrade() {
-                    app.monitor_state.borrow_mut().apply_pending();
+                    let updates = app.monitor_state.borrow_mut().take_pending();
+                    if !updates.is_empty() {
+                        app.request_apply(updates);
+                    }
                 }
             });
     }
 
-    fn refresh_popup(&self, popup: &MainWindow) -> f32 {
-        self.monitor_state.borrow_mut().refresh();
+    fn resize_popup_from_state(&self, popup: &MainWindow) -> f32 {
         let state = self.monitor_state.borrow();
-        popup.set_monitors(ModelRc::new(state.model()));
         popup.set_has_monitors(state.has_monitors());
-        let popup_height = resize_popup_to_content(popup, state.monitor_count());
-        drop(state);
-        position_popup(popup, popup_height);
-        popup_height
+        resize_popup_to_content(popup, state.monitor_count())
+    }
+
+    fn request_refresh(self: &Rc<Self>) {
+        self.apply_timer.stop();
+        self.monitor_state.borrow_mut().discard_pending();
+        self.set_status_message("");
+
+        let request_id = self.next_request_id();
+        self.latest_refresh_id.set(request_id);
+        match self.monitor_worker.refresh(request_id) {
+            Ok(()) => self.track_worker_request(),
+            Err(error) => {
+                eprintln!("failed to queue monitor refresh: {error}");
+                self.set_status_message("Couldn't refresh monitors.");
+            }
+        }
+    }
+
+    fn request_apply(self: &Rc<Self>, updates: Vec<monitor_hardware::BrightnessUpdate>) {
+        let request_id = self.next_request_id();
+        match self.monitor_worker.apply(request_id, updates) {
+            Ok(()) => self.track_worker_request(),
+            Err(error) => {
+                eprintln!("failed to queue brightness update: {error}");
+                self.set_status_message("Couldn't change brightness.");
+            }
+        }
+    }
+
+    fn next_request_id(&self) -> u64 {
+        let request_id = self.next_request_id.get();
+        self.next_request_id.set(request_id.wrapping_add(1).max(1));
+        request_id
+    }
+
+    fn track_worker_request(self: &Rc<Self>) {
+        let pending = self.pending_worker_requests.get() + 1;
+        self.pending_worker_requests.set(pending);
+        if pending != 1 {
+            return;
+        }
+
+        let app = Rc::downgrade(self);
+        self.monitor_event_timer
+            .start(TimerMode::Repeated, Duration::from_millis(25), move || {
+                if let Some(app) = app.upgrade() {
+                    app.poll_monitor_events();
+                }
+            });
+    }
+
+    fn poll_monitor_events(self: &Rc<Self>) {
+        loop {
+            match self.monitor_worker.try_recv() {
+                Ok(MonitorEvent::Refreshed { request_id, result }) => {
+                    self.handle_refresh_result(request_id, result);
+                    self.finish_worker_request();
+                }
+                Ok(MonitorEvent::Applied { request_id, report }) => {
+                    let _ = request_id;
+                    self.handle_apply_report(report);
+                    self.finish_worker_request();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    eprintln!("monitor worker disconnected");
+                    self.pending_worker_requests.set(0);
+                    self.monitor_event_timer.stop();
+                    self.set_status_message("Monitor service stopped.");
+                    break;
+                }
+            }
+        }
+    }
+
+    fn handle_refresh_result(&self, request_id: u64, result: Result<RefreshResult, String>) {
+        if request_id != self.latest_refresh_id.get() {
+            return;
+        }
+
+        match result {
+            Ok(result) => {
+                let has_warnings = !result.warnings.is_empty();
+                for warning in result.warnings {
+                    eprintln!("{warning}");
+                }
+                self.monitor_state
+                    .borrow_mut()
+                    .replace_snapshots(result.snapshots);
+                self.set_status_message(if has_warnings {
+                    "Some monitors couldn't be refreshed."
+                } else {
+                    ""
+                });
+            }
+            Err(error) => {
+                eprintln!("failed to refresh monitors: {error}");
+                self.set_status_message("Couldn't refresh monitors.");
+            }
+        }
+
+        self.with_popup(|popup| {
+            let popup_height = self.resize_popup_from_state(popup);
+            if popup.window().is_visible() {
+                position_popup(popup, popup_height);
+                stabilize_popup_position(popup, popup_height);
+            }
+        });
+    }
+
+    fn handle_apply_report(&self, report: ApplyReport) {
+        let errors = self
+            .monitor_state
+            .borrow_mut()
+            .reconcile_apply_report(report);
+        if errors.is_empty() {
+            self.set_status_message("");
+        } else {
+            for error in errors {
+                eprintln!("{error}");
+            }
+            self.set_status_message("Couldn't change brightness.");
+        }
+    }
+
+    fn finish_worker_request(&self) {
+        let pending = self.pending_worker_requests.get().saturating_sub(1);
+        self.pending_worker_requests.set(pending);
+        if pending == 0 {
+            self.monitor_event_timer.stop();
+        }
+    }
+
+    fn set_status_message(&self, message: &str) {
+        self.with_popup(|popup| popup.set_status_message(message.into()));
     }
 
     fn toggle_windows_theme(&self) {

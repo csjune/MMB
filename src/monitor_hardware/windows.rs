@@ -8,7 +8,9 @@ use windows_sys::Win32::Foundation::GetLastError;
 
 use self::ddc::DdcMonitor;
 use self::wmi::WmiMonitor;
-use super::{MonitorId, MonitorSnapshot};
+use super::{
+    ApplyOutcome, ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot, RefreshResult,
+};
 
 #[derive(Debug)]
 pub enum MonitorError {
@@ -17,6 +19,10 @@ pub enum MonitorError {
         code: u32,
     },
     Wmi {
+        context: &'static str,
+        details: String,
+    },
+    InvalidData {
         context: &'static str,
         details: String,
     },
@@ -39,9 +45,8 @@ impl fmt::Display for MonitorError {
                 write!(formatter, "{context} (win32 error {code})")
             }
             Self::Wmi { context, details } => write!(formatter, "{context}: {details}"),
-            Self::UnknownMonitor(id) => {
-                write!(formatter, "unknown monitor id {}", id.index())
-            }
+            Self::InvalidData { context, details } => write!(formatter, "{context}: {details}"),
+            Self::UnknownMonitor(id) => write!(formatter, "unknown monitor id {id}"),
         }
     }
 }
@@ -54,6 +59,13 @@ enum Monitor {
 }
 
 impl Monitor {
+    fn id(&self) -> &MonitorId {
+        match self {
+            Self::Ddc(monitor) => monitor.id(),
+            Self::Wmi(monitor) => monitor.id(),
+        }
+    }
+
     fn name(&self) -> &str {
         match self {
             Self::Ddc(monitor) => monitor.name(),
@@ -87,38 +99,73 @@ impl MonitorController {
         }
     }
 
-    pub fn refresh(&mut self) -> Result<(), MonitorError> {
+    pub fn refresh(&mut self) -> Result<RefreshResult, MonitorError> {
         let mut monitors = ddc::discover()?
             .into_iter()
             .map(|monitor| Monitor::Ddc(Box::new(monitor)))
             .collect::<Vec<_>>();
 
+        let mut warnings = Vec::new();
         match wmi::discover() {
-            Ok(wmi_monitors) => monitors.extend(wmi_monitors.into_iter().map(Monitor::Wmi)),
-            Err(error) => eprintln!("failed to refresh WMI monitors: {error}"),
+            Ok(discovery) => {
+                warnings.extend(discovery.warnings);
+                monitors.extend(discovery.monitors.into_iter().map(Monitor::Wmi));
+            }
+            Err(error) => warnings.push(format!("failed to refresh WMI monitors: {error}")),
         }
 
         self.monitors = monitors;
-        Ok(())
-    }
-
-    pub fn snapshots(&self) -> Vec<MonitorSnapshot> {
-        self.monitors
+        let snapshots = self
+            .monitors
             .iter()
-            .enumerate()
-            .map(|(index, monitor)| MonitorSnapshot {
-                id: MonitorId::from_index(index),
+            .map(|monitor| MonitorSnapshot {
+                id: monitor.id().clone(),
                 name: monitor.name().to_string(),
                 brightness: monitor.brightness(),
             })
-            .collect()
+            .collect();
+
+        Ok(RefreshResult {
+            snapshots,
+            warnings,
+        })
     }
 
-    pub fn set_brightness(&mut self, id: MonitorId, percent: i32) -> Result<(), MonitorError> {
-        self.monitors
-            .get_mut(id.index())
-            .ok_or(MonitorError::UnknownMonitor(id))?
-            .set_brightness(percent.clamp(0, 100))
+    pub fn apply(&mut self, updates: Vec<BrightnessUpdate>) -> ApplyReport {
+        let outcomes = updates
+            .into_iter()
+            .map(|update| {
+                let requested = update.value.clamp(0, 100);
+                let Some(monitor) = self
+                    .monitors
+                    .iter_mut()
+                    .find(|monitor| monitor.id() == &update.id)
+                else {
+                    let error = MonitorError::UnknownMonitor(update.id.clone()).to_string();
+                    return ApplyOutcome {
+                        id: update.id,
+                        requested,
+                        effective: None,
+                        error: Some(error),
+                    };
+                };
+
+                let previous = monitor.brightness();
+                let error = monitor
+                    .set_brightness(requested)
+                    .err()
+                    .map(|error| error.to_string());
+
+                ApplyOutcome {
+                    id: update.id,
+                    requested,
+                    effective: Some(if error.is_some() { previous } else { requested }),
+                    error,
+                }
+            })
+            .collect();
+
+        ApplyReport { outcomes }
     }
 }
 

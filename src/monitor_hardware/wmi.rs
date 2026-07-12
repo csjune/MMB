@@ -3,16 +3,21 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use wmi::WMIConnection;
 
-use super::MonitorError;
 use super::display_config::{active_display_pnp_ids, normalize_pnp_id};
+use super::{MonitorError, MonitorId};
 
 pub(super) struct WmiMonitor {
+    id: MonitorId,
     name: String,
     brightness: i32,
     instance_path: String,
 }
 
 impl WmiMonitor {
+    pub(super) fn id(&self) -> &MonitorId {
+        &self.id
+    }
+
     pub(super) fn name(&self) -> &str {
         &self.name
     }
@@ -48,7 +53,12 @@ impl WmiMonitor {
     }
 }
 
-pub(super) fn discover() -> Result<Vec<WmiMonitor>, MonitorError> {
+pub(super) struct WmiDiscovery {
+    pub(super) monitors: Vec<WmiMonitor>,
+    pub(super) warnings: Vec<String>,
+}
+
+pub(super) fn discover() -> Result<WmiDiscovery, MonitorError> {
     let connection = wmi_connection("ROOT\\WMI")?;
     let brightness_monitors: Vec<WmiMonitorBrightness> = connection
         .raw_query(
@@ -65,46 +75,61 @@ pub(super) fn discover() -> Result<Vec<WmiMonitor>, MonitorError> {
         .filter(|monitor| monitor.Active)
         .map(|monitor| (monitor.InstanceName, monitor.path))
         .collect();
-    let active_pnp_ids = active_display_pnp_ids().unwrap_or_else(|error| {
-        eprintln!("failed to query active display paths: {error}");
-        Default::default()
-    });
-    let friendly_names = wmi_monitor_names(&connection).unwrap_or_else(|error| {
-        eprintln!("failed to query WMI monitor names: {error}");
-        HashMap::new()
-    });
-    let pnp_names = pnp_monitor_names().unwrap_or_else(|error| {
-        eprintln!("failed to query PNP monitor names: {error}");
-        HashMap::new()
-    });
+    let active_pnp_ids = active_display_pnp_ids()?;
+    let mut warnings = Vec::new();
+    let friendly_names = match wmi_monitor_names(&connection) {
+        Ok(names) => names,
+        Err(error) => {
+            warnings.push(format!("failed to query WMI monitor names: {error}"));
+            HashMap::new()
+        }
+    };
+    let pnp_names = match pnp_monitor_names() {
+        Ok(names) => names,
+        Err(error) => {
+            warnings.push(format!("failed to query PNP monitor names: {error}"));
+            HashMap::new()
+        }
+    };
+    let mut monitors = Vec::new();
 
-    Ok(brightness_monitors
+    for monitor in brightness_monitors
         .into_iter()
         .filter(|monitor| monitor.Active)
-        .filter_map(|monitor| {
-            let instance_path = method_paths.get(&monitor.InstanceName)?.clone();
-            let pnp_id = wmi_instance_to_pnp_id(&monitor.InstanceName);
-            if !active_pnp_ids.is_empty()
-                && pnp_id
-                    .as_ref()
-                    .is_some_and(|pnp_id| !active_pnp_ids.contains(pnp_id))
-            {
-                return None;
-            }
+    {
+        let Some(instance_path) = method_paths.get(&monitor.InstanceName).cloned() else {
+            warnings.push(format!(
+                "missing WMI brightness method for {}",
+                monitor.InstanceName
+            ));
+            continue;
+        };
+        let Some(pnp_id) = wmi_instance_to_pnp_id(&monitor.InstanceName) else {
+            warnings.push(format!(
+                "invalid WMI monitor instance name {}",
+                monitor.InstanceName
+            ));
+            continue;
+        };
+        if !active_pnp_ids.contains(&pnp_id) {
+            continue;
+        }
 
-            let name = friendly_names
-                .get(&monitor.InstanceName)
-                .cloned()
-                .or_else(|| pnp_id.as_ref().and_then(|id| pnp_names.get(id).cloned()))
-                .unwrap_or_else(|| "Integrated Monitor".into());
+        let name = friendly_names
+            .get(&monitor.InstanceName)
+            .cloned()
+            .or_else(|| pnp_names.get(&pnp_id).cloned())
+            .unwrap_or_else(|| "Integrated Monitor".into());
 
-            Some(WmiMonitor {
-                name,
-                brightness: monitor.CurrentBrightness as i32,
-                instance_path,
-            })
-        })
-        .collect())
+        monitors.push(WmiMonitor {
+            id: MonitorId::new(format!("wmi:{}", normalize_pnp_id(&monitor.InstanceName))),
+            name,
+            brightness: monitor.CurrentBrightness as i32,
+            instance_path,
+        });
+    }
+
+    Ok(WmiDiscovery { monitors, warnings })
 }
 
 fn wmi_monitor_names(connection: &WMIConnection) -> Result<HashMap<String, String>, MonitorError> {
