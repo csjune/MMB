@@ -88,14 +88,6 @@ impl AppController {
 
     fn install_handlers(self: &Rc<Self>) {
         let app = Rc::downgrade(self);
-        self.outside_click_timer
-            .start(TimerMode::Repeated, Duration::from_millis(50), move || {
-                if let Some(app) = app.upgrade() {
-                    app.poll_outside_click();
-                }
-            });
-
-        let app = Rc::downgrade(self);
         self.tray.on_toggle_window(move || {
             let Some(app) = app.upgrade() else {
                 return;
@@ -125,9 +117,13 @@ impl AppController {
         popup.set_has_monitors(state.has_monitors());
         popup.set_dark_mode(self.dark_mode.get());
         drop(state);
-        popup
-            .window()
-            .on_close_requested(|| CloseRequestResponse::HideWindow);
+        let app = Rc::downgrade(self);
+        popup.window().on_close_requested(move || {
+            if let Some(app) = app.upgrade() {
+                app.stop_outside_click_watcher();
+            }
+            CloseRequestResponse::HideWindow
+        });
 
         let app = Rc::downgrade(self);
         popup.on_brightness_changed(move |monitor_id, value| {
@@ -170,7 +166,7 @@ impl AppController {
         let popup_ref = self.popup.borrow();
         let popup = popup_ref.as_ref().expect("popup was just created");
         if popup.window().is_visible() {
-            popup.hide().ok();
+            self.hide_popup(popup);
             return Ok(());
         }
 
@@ -183,6 +179,7 @@ impl AppController {
         popup.show()?;
         position_popup(popup, popup_height);
         stabilize_popup_position(popup, popup_height);
+        self.start_outside_click_watcher();
         Ok(())
     }
 
@@ -252,28 +249,56 @@ impl AppController {
         ));
     }
 
+    fn start_outside_click_watcher(self: &Rc<Self>) {
+        self.left_button_was_down
+            .set(windows_integration::left_mouse_button_down());
+        self.click_started_inside_popup.set(false);
+
+        let app = Rc::downgrade(self);
+        self.outside_click_timer
+            .start(TimerMode::Repeated, Duration::from_millis(50), move || {
+                if let Some(app) = app.upgrade() {
+                    app.poll_outside_click();
+                }
+            });
+    }
+
+    fn stop_outside_click_watcher(&self) {
+        self.outside_click_timer.stop();
+        self.click_started_inside_popup.set(false);
+    }
+
+    fn hide_popup(&self, popup: &MainWindow) {
+        popup.hide().ok();
+        self.stop_outside_click_watcher();
+    }
+
     fn poll_outside_click(&self) {
         let left_button_is_down = windows_integration::left_mouse_button_down();
         let left_button_went_down = left_button_is_down && !self.left_button_was_down.get();
         let left_button_went_up = !left_button_is_down && self.left_button_was_down.get();
 
-        self.with_popup(|popup| {
-            if !popup.window().is_visible() {
-                return;
-            }
+        let popup_ref = self.popup.borrow();
+        let Some(popup) = popup_ref.as_ref() else {
+            self.stop_outside_click_watcher();
+            return;
+        };
+        if !popup.window().is_visible() {
+            self.stop_outside_click_watcher();
+            return;
+        }
 
-            if left_button_went_down {
-                self.click_started_inside_popup
-                    .set(cursor_is_inside_popup(popup));
-            }
+        if left_button_went_down {
+            self.click_started_inside_popup
+                .set(cursor_is_inside_popup(popup));
+        }
 
-            if left_button_went_up
-                && !self.click_started_inside_popup.get()
-                && !cursor_is_inside_popup(popup)
-            {
-                popup.hide().ok();
-            }
-        });
+        if left_button_went_up
+            && !self.click_started_inside_popup.get()
+            && !cursor_is_inside_popup(popup)
+        {
+            self.hide_popup(popup);
+        }
 
         self.left_button_was_down.set(left_button_is_down);
     }
