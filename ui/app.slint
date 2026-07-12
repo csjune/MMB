@@ -258,12 +258,29 @@ component IconButton inherits Rectangle {
     }
 }
 
+component RefreshIndicator inherits Rectangle {
+    background: transparent;
+    accessible-role: progress-indicator;
+    accessible-label: "Refreshing monitors";
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: "Refreshing monitors...";
+        color: AppPalette.muted-foreground;
+        font-size: 14px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 export component MainWindow inherits Window {
     in property <image> app-icon;
     in-out property <[MonitorEntry]> monitors;
     in-out property <bool> sync-all;
     in-out property <bool> dark-mode <=> AppPalette.dark-mode;
     in property <bool> has-monitors;
+    in property <bool> refreshing;
     in property <string> status-message;
     in property <length> body-height: PopupMetrics.empty-body-height;
 
@@ -300,7 +317,14 @@ export component MainWindow inherits Window {
                 height: root.body-height + PopupMetrics.body-padding * 2;
                 background: transparent;
 
-                if root.has-monitors : ScrollView {
+                if root.refreshing : RefreshIndicator {
+                    x: PopupMetrics.content-padding;
+                    y: PopupMetrics.body-padding;
+                    width: PopupMetrics.content-width;
+                    height: root.body-height;
+                }
+
+                if !root.refreshing && root.has-monitors : ScrollView {
                     x: PopupMetrics.content-padding;
                     y: PopupMetrics.body-padding;
                     width: PopupMetrics.content-width;
@@ -329,7 +353,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !root.has-monitors : Rectangle {
+                if !root.refreshing && !root.has-monitors : Rectangle {
                     x: PopupMetrics.content-padding;
                     y: PopupMetrics.body-padding;
                     width: PopupMetrics.content-width;

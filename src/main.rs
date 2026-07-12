@@ -130,6 +130,7 @@ impl AppController {
         popup.set_monitors(ModelRc::new(state.model()));
         popup.set_has_monitors(state.has_monitors());
         popup.set_dark_mode(self.dark_mode.get());
+        popup.set_refreshing(false);
         popup.set_status_message(SharedString::default());
         drop(state);
         let app = Rc::downgrade(self);
@@ -243,6 +244,7 @@ impl AppController {
     fn request_refresh(self: &Rc<Self>) {
         self.apply_timer.stop();
         self.monitor_state.borrow_mut().discard_pending();
+        self.set_refreshing(true);
         self.set_status_message("");
 
         let request_id = self.next_request_id();
@@ -251,6 +253,7 @@ impl AppController {
             Ok(()) => self.track_worker_request(),
             Err(error) => {
                 eprintln!("failed to queue monitor refresh: {error}");
+                self.set_refreshing(false);
                 self.set_status_message("Couldn't refresh monitors.");
             }
         }
@@ -306,6 +309,7 @@ impl AppController {
                     eprintln!("monitor worker disconnected");
                     self.pending_worker_requests.set(0);
                     self.monitor_event_timer.stop();
+                    self.set_refreshing(false);
                     self.set_status_message("Monitor service stopped.");
                     break;
                 }
@@ -318,6 +322,7 @@ impl AppController {
             return;
         }
 
+        self.set_refreshing(false);
         match result {
             Ok(result) => {
                 let has_warnings = !result.warnings.is_empty();
@@ -373,6 +378,10 @@ impl AppController {
 
     fn set_status_message(&self, message: &str) {
         self.with_popup(|popup| popup.set_status_message(message.into()));
+    }
+
+    fn set_refreshing(&self, refreshing: bool) {
+        self.with_popup(|popup| popup.set_refreshing(refreshing));
     }
 
     fn toggle_windows_theme(&self) {
