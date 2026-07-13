@@ -14,38 +14,58 @@ use super::{MonitorError, wide_to_string, win32_status};
 
 #[derive(Default)]
 pub(super) struct ActiveDisplayPaths {
-    pnp_by_gdi_name: HashMap<String, String>,
+    pnp_by_gdi_name: HashMap<String, Vec<String>>,
     pnp_ids: HashSet<String>,
+    complete: bool,
     pub(super) warnings: Vec<String>,
 }
 
 impl ActiveDisplayPaths {
-    pub(super) fn pnp_id_for_gdi_name(&self, gdi_name: &str) -> Option<&str> {
+    pub(super) fn pnp_ids_for_gdi_name(&self, gdi_name: &str) -> &[String] {
         self.pnp_by_gdi_name
             .get(&normalize_gdi_name(gdi_name))
-            .map(String::as_str)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     pub(super) fn contains_pnp_id(&self, pnp_id: &str) -> bool {
         self.pnp_ids.contains(pnp_id)
     }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    fn add_path(&mut self, gdi_name: &str, pnp_id: String) {
+        self.pnp_ids.insert(pnp_id.clone());
+        let pnp_ids = self
+            .pnp_by_gdi_name
+            .entry(normalize_gdi_name(gdi_name))
+            .or_default();
+        pnp_ids.push(pnp_id);
+        pnp_ids.sort_unstable();
+        pnp_ids.dedup();
+    }
 }
 
 pub(super) fn active_display_paths() -> Result<ActiveDisplayPaths, MonitorError> {
     let paths = query_active_paths()?;
-    let mut result = ActiveDisplayPaths::default();
+    let mut result = ActiveDisplayPaths {
+        complete: true,
+        ..ActiveDisplayPaths::default()
+    };
 
     for path in paths {
         match active_display_path(path) {
             Ok((gdi_name, pnp_id)) => {
-                result.pnp_ids.insert(pnp_id.clone());
-                result
-                    .pnp_by_gdi_name
-                    .insert(normalize_gdi_name(&gdi_name), pnp_id);
+                result.add_path(&gdi_name, pnp_id);
             }
-            Err(error) => result
-                .warnings
-                .push(format!("failed to inspect active display path: {error}")),
+            Err(error) => {
+                result.complete = false;
+                result
+                    .warnings
+                    .push(format!("failed to inspect active display path: {error}"));
+            }
         }
     }
 
@@ -184,7 +204,9 @@ fn normalize_gdi_name(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_gdi_name, normalize_pnp_id, pnp_id_from_monitor_device_path};
+    use super::{
+        ActiveDisplayPaths, normalize_gdi_name, normalize_pnp_id, pnp_id_from_monitor_device_path,
+    };
 
     #[test]
     fn monitor_device_paths_become_normalized_pnp_ids() {
@@ -198,5 +220,16 @@ mod tests {
             r"DISPLAY\ABC\INSTANCE"
         );
         assert_eq!(normalize_gdi_name(r"\\.\display1"), r"\\.\DISPLAY1");
+    }
+
+    #[test]
+    fn cloned_display_sources_keep_every_target() {
+        let mut paths = ActiveDisplayPaths::default();
+        paths.add_path(r"\\.\DISPLAY1", r"DISPLAY\B\2".into());
+        paths.add_path(r"\\.\display1", r"DISPLAY\A\1".into());
+        paths.add_path(r"\\.\DISPLAY1", r"DISPLAY\B\2".into());
+        let targets = paths.pnp_ids_for_gdi_name(r"\\.\display1");
+
+        assert_eq!(targets, [r"DISPLAY\A\1", r"DISPLAY\B\2"]);
     }
 }

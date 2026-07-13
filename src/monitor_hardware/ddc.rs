@@ -2,11 +2,12 @@ use std::mem;
 use std::ptr;
 
 use windows_sys::Win32::Devices::Display::{
-    DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
-    GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
+    DestroyPhysicalMonitors, GetMonitorBrightness, GetMonitorCapabilities,
+    GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, MC_CAPS_BRIGHTNESS,
+    PHYSICAL_MONITOR, SetMonitorBrightness,
 };
 use windows_sys::Win32::Foundation::{
-    ERROR_GEN_FAILURE, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, GetLastError, LPARAM, RECT,
+    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, GetLastError, LPARAM, RECT,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
@@ -117,7 +118,7 @@ fn enumerate_display_monitors() -> Result<Vec<HMONITOR>, MonitorError> {
 
 fn discover_physical_monitors(hmonitor: HMONITOR, paths: &ActiveDisplayPaths) -> DdcDiscovery {
     let display_name = display_name(hmonitor).unwrap_or_else(|| "UNKNOWN-DISPLAY".into());
-    let pnp_id = paths.pnp_id_for_gdi_name(&display_name);
+    let pnp_ids = paths.pnp_ids_for_gdi_name(&display_name);
     let mut count = 0;
     let ok = unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count) };
     if ok == 0 {
@@ -148,7 +149,7 @@ fn discover_physical_monitors(hmonitor: HMONITOR, paths: &ActiveDisplayPaths) ->
     let mut monitors = Vec::new();
     let mut warnings = Vec::new();
     for (index, physical_monitor) in physical_monitors.into_iter().enumerate() {
-        match build_monitor(&display_name, pnp_id, index, physical_monitor) {
+        match build_monitor(hmonitor, &display_name, pnp_ids, index, physical_monitor) {
             Ok(Some(monitor)) => monitors.push(monitor),
             Ok(None) => {}
             Err(error) => warnings.push(format!("failed to inspect {display_name}: {error}")),
@@ -159,12 +160,26 @@ fn discover_physical_monitors(hmonitor: HMONITOR, paths: &ActiveDisplayPaths) ->
 }
 
 fn build_monitor(
+    hmonitor: HMONITOR,
     display_name: &str,
-    pnp_id: Option<&str>,
+    pnp_ids: &[String],
     physical_index: usize,
     physical_monitor: PHYSICAL_MONITOR,
 ) -> Result<Option<DdcMonitor>, MonitorError> {
     let physical_monitor = PhysicalMonitorHandle::new(physical_monitor);
+    let mut capabilities = 0;
+    let mut color_temperatures = 0;
+    let capabilities_ok = unsafe {
+        GetMonitorCapabilities(
+            physical_monitor.handle(),
+            &mut capabilities,
+            &mut color_temperatures,
+        )
+    };
+    if capabilities_ok != 0 && capabilities & MC_CAPS_BRIGHTNESS == 0 {
+        return Ok(None);
+    }
+
     let mut min = 0;
     let mut current = 0;
     let mut max = 0;
@@ -174,11 +189,9 @@ fn build_monitor(
 
     if ok == 0 {
         let code = unsafe { GetLastError() };
-        if matches!(
-            code,
-            ERROR_INVALID_FUNCTION | ERROR_GEN_FAILURE | ERROR_NOT_SUPPORTED
-        ) {
-            return Ok(None);
+        match classify_brightness_error(code) {
+            BrightnessErrorKind::Unsupported => return Ok(None),
+            BrightnessErrorKind::Failed => {}
         }
         return Err(MonitorError::Win32 {
             context: "GetMonitorBrightness failed",
@@ -194,11 +207,21 @@ fn build_monitor(
 
     let description = physical_monitor.description();
     let name = wide_to_string(&description).unwrap_or_else(|| display_name.to_string());
-    let id = MonitorId::new(match pnp_id {
-        Some(pnp_id) => format!("ddc:{pnp_id}:{physical_index}"),
-        None => format!(
+    let id = MonitorId::new(match pnp_ids {
+        [pnp_id] => format!("ddc:{pnp_id}:{physical_index}"),
+        [] if display_name != "UNKNOWN-DISPLAY" => format!(
             "ddc-gdi:{}:{physical_index}:{}",
             display_name.to_ascii_uppercase(),
+            name.to_ascii_uppercase()
+        ),
+        [] => format!(
+            "ddc-hmonitor:{:X}:{physical_index}:{}",
+            hmonitor as usize,
+            name.to_ascii_uppercase()
+        ),
+        pnp_ids => format!(
+            "ddc-clone:{}:{physical_index}:{}",
+            pnp_ids.join("|"),
             name.to_ascii_uppercase()
         ),
     });
@@ -211,6 +234,20 @@ fn build_monitor(
         min,
         max,
     }))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrightnessErrorKind {
+    Unsupported,
+    Failed,
+}
+
+fn classify_brightness_error(code: u32) -> BrightnessErrorKind {
+    if matches!(code, ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED) {
+        BrightnessErrorKind::Unsupported
+    } else {
+        BrightnessErrorKind::Failed
+    }
 }
 
 unsafe extern "system" fn enum_monitor(
@@ -261,7 +298,11 @@ fn percent_to_raw(percent: i32, min: u32, max: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_to_raw, raw_to_percent};
+    use windows_sys::Win32::Foundation::{
+        ERROR_GEN_FAILURE, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+    };
+
+    use super::{BrightnessErrorKind, classify_brightness_error, percent_to_raw, raw_to_percent};
 
     #[test]
     fn brightness_conversion_respects_monitor_ranges() {
@@ -271,5 +312,21 @@ mod tests {
         assert_eq!(percent_to_raw(0, 10, 90), 10);
         assert_eq!(percent_to_raw(50, 10, 90), 50);
         assert_eq!(percent_to_raw(100, 10, 90), 90);
+    }
+
+    #[test]
+    fn only_explicit_unsupported_errors_hide_a_monitor() {
+        assert_eq!(
+            classify_brightness_error(ERROR_INVALID_FUNCTION),
+            BrightnessErrorKind::Unsupported
+        );
+        assert_eq!(
+            classify_brightness_error(ERROR_NOT_SUPPORTED),
+            BrightnessErrorKind::Unsupported
+        );
+        assert_eq!(
+            classify_brightness_error(ERROR_GEN_FAILURE),
+            BrightnessErrorKind::Failed
+        );
     }
 }

@@ -2,10 +2,11 @@ use std::fmt;
 use std::mem;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM};
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HWND, LPARAM};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD, RegGetValueW, RegSetKeyValueW,
+    HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD, RegDeleteKeyValueW, RegGetValueW,
+    RegSetKeyValueW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, HWND_BROADCAST, PostMessageW, SMTO_ABORTIFHUNG, SMTO_NOTIMEOUTIFNOTHUNG,
@@ -49,41 +50,49 @@ struct WindowsThemeState {
     system_dark_mode: bool,
 }
 
-pub fn windows_main_dark_mode() -> bool {
-    windows_theme_state().system_dark_mode
+pub fn windows_main_dark_mode() -> Result<bool, WindowsIntegrationError> {
+    Ok(windows_theme_state()?.system_dark_mode)
 }
 
-pub fn next_windows_dark_mode() -> bool {
-    let theme_state = windows_theme_state();
+pub fn next_windows_dark_mode() -> Result<bool, WindowsIntegrationError> {
+    let theme_state = windows_theme_state()?;
 
-    if theme_state.apps_dark_mode == theme_state.system_dark_mode {
-        !theme_state.system_dark_mode
-    } else {
-        theme_state.system_dark_mode
-    }
+    Ok(
+        if theme_state.apps_dark_mode == theme_state.system_dark_mode {
+            !theme_state.system_dark_mode
+        } else {
+            theme_state.system_dark_mode
+        },
+    )
 }
 
 pub fn set_windows_dark_mode(dark_mode: bool) -> Result<(), WindowsIntegrationError> {
     let light_theme_value = if dark_mode { 0u32 } else { 1u32 };
-
-    set_theme_registry_value("SystemUsesLightTheme", light_theme_value)?;
-    set_theme_registry_value("AppsUseLightTheme", light_theme_value)?;
+    let mut registry = WindowsThemeRegistry;
+    update_theme_registry(&mut registry, light_theme_value)
+        .map_err(ThemeUpdateError::into_error)?;
     broadcast_theme_change();
     Ok(())
 }
 
-fn windows_theme_state() -> WindowsThemeState {
-    WindowsThemeState {
-        apps_dark_mode: theme_registry_dark_mode("AppsUseLightTheme"),
-        system_dark_mode: theme_registry_dark_mode("SystemUsesLightTheme"),
-    }
+fn windows_theme_state() -> Result<WindowsThemeState, WindowsIntegrationError> {
+    Ok(WindowsThemeState {
+        apps_dark_mode: theme_registry_dark_mode("AppsUseLightTheme")?,
+        system_dark_mode: theme_registry_dark_mode("SystemUsesLightTheme")?,
+    })
 }
 
-fn theme_registry_dark_mode(name: &'static str) -> bool {
-    read_theme_registry_value(name) == Some(0)
+fn theme_registry_dark_mode(name: &'static str) -> Result<bool, WindowsIntegrationError> {
+    Ok(theme_value_is_dark(read_theme_registry_value_result(name)?))
 }
 
-fn read_theme_registry_value(name: &'static str) -> Option<u32> {
+fn theme_value_is_dark(value: Option<u32>) -> bool {
+    value.unwrap_or(1) == 0
+}
+
+fn read_theme_registry_value_result(
+    name: &'static str,
+) -> Result<Option<u32>, WindowsIntegrationError> {
     let subkey = wide_null(THEME_REGISTRY_SUBKEY);
     let value_name = wide_null(name);
     let mut value = 1u32;
@@ -100,7 +109,103 @@ fn read_theme_registry_value(name: &'static str) -> Option<u32> {
         )
     };
 
-    (status == ERROR_SUCCESS).then_some(value)
+    match status {
+        ERROR_SUCCESS => Ok(Some(value)),
+        ERROR_FILE_NOT_FOUND => Ok(None),
+        code => Err(WindowsIntegrationError {
+            context: "RegGetValueW failed",
+            code,
+        }),
+    }
+}
+
+fn delete_theme_registry_value(name: &'static str) -> Result<(), WindowsIntegrationError> {
+    let subkey = wide_null(THEME_REGISTRY_SUBKEY);
+    let value_name = wide_null(name);
+    let status =
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, subkey.as_ptr(), value_name.as_ptr()) };
+
+    if matches!(status, ERROR_SUCCESS | ERROR_FILE_NOT_FOUND) {
+        Ok(())
+    } else {
+        Err(WindowsIntegrationError {
+            context: "RegDeleteKeyValueW failed",
+            code: status,
+        })
+    }
+}
+
+trait ThemeRegistry {
+    type Error;
+
+    fn read(&mut self, name: &'static str) -> Result<Option<u32>, Self::Error>;
+    fn write(&mut self, name: &'static str, value: u32) -> Result<(), Self::Error>;
+    fn delete(&mut self, name: &'static str) -> Result<(), Self::Error>;
+}
+
+struct WindowsThemeRegistry;
+
+impl ThemeRegistry for WindowsThemeRegistry {
+    type Error = WindowsIntegrationError;
+
+    fn read(&mut self, name: &'static str) -> Result<Option<u32>, Self::Error> {
+        read_theme_registry_value_result(name)
+    }
+
+    fn write(&mut self, name: &'static str, value: u32) -> Result<(), Self::Error> {
+        set_theme_registry_value(name, value)
+    }
+
+    fn delete(&mut self, name: &'static str) -> Result<(), Self::Error> {
+        delete_theme_registry_value(name)
+    }
+}
+
+enum ThemeUpdateError<E> {
+    Update(E),
+    Rollback(E),
+}
+
+impl<E> ThemeUpdateError<E> {
+    fn into_error(self) -> E {
+        match self {
+            Self::Update(error) | Self::Rollback(error) => error,
+        }
+    }
+}
+
+fn update_theme_registry<R: ThemeRegistry>(
+    registry: &mut R,
+    value: u32,
+) -> Result<(), ThemeUpdateError<R::Error>> {
+    let previous_system = registry
+        .read("SystemUsesLightTheme")
+        .map_err(ThemeUpdateError::Update)?;
+    registry
+        .read("AppsUseLightTheme")
+        .map_err(ThemeUpdateError::Update)?;
+    registry
+        .write("SystemUsesLightTheme", value)
+        .map_err(ThemeUpdateError::Update)?;
+
+    if let Err(error) = registry.write("AppsUseLightTheme", value) {
+        restore_theme_registry_value(registry, "SystemUsesLightTheme", previous_system)
+            .map_err(ThemeUpdateError::Rollback)?;
+        return Err(ThemeUpdateError::Update(error));
+    }
+
+    Ok(())
+}
+
+fn restore_theme_registry_value<R: ThemeRegistry>(
+    registry: &mut R,
+    name: &'static str,
+    value: Option<u32>,
+) -> Result<(), R::Error> {
+    match value {
+        Some(value) => registry.write(name, value),
+        None => registry.delete(name),
+    }
 }
 
 fn set_theme_registry_value(name: &'static str, value: u32) -> Result<(), WindowsIntegrationError> {
@@ -237,4 +342,69 @@ fn update_per_user_system_parameters() {
 
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{ThemeRegistry, theme_value_is_dark, update_theme_registry};
+
+    #[derive(Default)]
+    struct FakeRegistry {
+        values: HashMap<&'static str, u32>,
+        fail_write: Option<&'static str>,
+    }
+
+    impl ThemeRegistry for FakeRegistry {
+        type Error = &'static str;
+
+        fn read(&mut self, name: &'static str) -> Result<Option<u32>, Self::Error> {
+            Ok(self.values.get(name).copied())
+        }
+
+        fn write(&mut self, name: &'static str, value: u32) -> Result<(), Self::Error> {
+            if self.fail_write == Some(name) {
+                self.fail_write = None;
+                return Err("write failed");
+            }
+            self.values.insert(name, value);
+            Ok(())
+        }
+
+        fn delete(&mut self, name: &'static str) -> Result<(), Self::Error> {
+            self.values.remove(name);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn second_theme_write_failure_restores_the_first_value() {
+        let mut registry = FakeRegistry {
+            values: HashMap::from([("SystemUsesLightTheme", 1), ("AppsUseLightTheme", 1)]),
+            fail_write: Some("AppsUseLightTheme"),
+        };
+
+        assert!(update_theme_registry(&mut registry, 0).is_err());
+        assert_eq!(registry.values["SystemUsesLightTheme"], 1);
+        assert_eq!(registry.values["AppsUseLightTheme"], 1);
+    }
+
+    #[test]
+    fn rollback_removes_a_value_that_was_originally_missing() {
+        let mut registry = FakeRegistry {
+            values: HashMap::from([("AppsUseLightTheme", 1)]),
+            fail_write: Some("AppsUseLightTheme"),
+        };
+
+        assert!(update_theme_registry(&mut registry, 0).is_err());
+        assert!(!registry.values.contains_key("SystemUsesLightTheme"));
+    }
+
+    #[test]
+    fn a_missing_theme_value_uses_the_windows_light_default() {
+        assert!(!theme_value_is_dark(None));
+        assert!(theme_value_is_dark(Some(0)));
+        assert!(!theme_value_is_dark(Some(1)));
+    }
 }

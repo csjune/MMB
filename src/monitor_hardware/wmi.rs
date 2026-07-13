@@ -58,7 +58,9 @@ pub(super) struct WmiDiscovery {
     pub(super) warnings: Vec<String>,
 }
 
-pub(super) fn discover(active_paths: &ActiveDisplayPaths) -> Result<WmiDiscovery, MonitorError> {
+pub(super) fn discover(
+    active_paths: Option<&ActiveDisplayPaths>,
+) -> Result<WmiDiscovery, MonitorError> {
     let connection = wmi_connection("ROOT\\WMI")?;
     let brightness_monitors: Vec<WmiMonitorBrightness> = connection
         .raw_query(
@@ -110,7 +112,7 @@ pub(super) fn discover(active_paths: &ActiveDisplayPaths) -> Result<WmiDiscovery
             ));
             continue;
         };
-        if !active_paths.contains_pnp_id(&pnp_id) {
+        if active_paths.is_some_and(|paths| !paths.contains_pnp_id(&pnp_id)) {
             continue;
         }
 

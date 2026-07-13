@@ -137,6 +137,10 @@ impl MonitorState {
         self.model.row_count() > 0
     }
 
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     pub(crate) fn monitor_count(&self) -> usize {
         self.model.row_count()
     }

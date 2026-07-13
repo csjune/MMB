@@ -18,7 +18,7 @@ mod mouse_hook;
 mod theme;
 
 #[cfg(windows)]
-pub use desktop::work_area_near_cursor;
+pub use desktop::{show_error_message, work_area_near_cursor};
 #[cfg(windows)]
 pub use mouse_hook::{GlobalMouseEvent, GlobalMouseWatcher};
 #[cfg(windows)]
@@ -36,14 +36,17 @@ mod fallback {
 
     #[derive(Clone, Copy)]
     pub enum GlobalMouseEvent {
-        LeftDown { x: i32, y: i32 },
-        LeftUp { x: i32, y: i32 },
+        ButtonDown { click_id: u64, x: i32, y: i32 },
     }
 
     pub struct GlobalMouseWatcher;
 
     impl GlobalMouseWatcher {
-        pub fn new() -> Self {
+        pub fn new() -> Result<Self, WindowsIntegrationError> {
+            Err(WindowsIntegrationError)
+        }
+
+        pub fn polling() -> Self {
             Self
         }
 
@@ -52,6 +55,10 @@ mod fallback {
         }
 
         pub fn drain(&self) {}
+
+        pub fn latest_click_id(&self) -> u64 {
+            0
+        }
     }
 
     impl fmt::Display for WindowsIntegrationError {
@@ -69,21 +76,25 @@ mod fallback {
         None
     }
 
-    pub fn windows_main_dark_mode() -> bool {
-        false
+    pub fn windows_main_dark_mode() -> Result<bool, WindowsIntegrationError> {
+        Err(WindowsIntegrationError)
     }
 
-    pub fn next_windows_dark_mode() -> bool {
-        true
+    pub fn next_windows_dark_mode() -> Result<bool, WindowsIntegrationError> {
+        Err(WindowsIntegrationError)
     }
 
     pub fn set_windows_dark_mode(_dark_mode: bool) -> Result<(), WindowsIntegrationError> {
         Err(WindowsIntegrationError)
+    }
+
+    pub fn show_error_message(title: &str, message: &str) {
+        eprintln!("{title}: {message}");
     }
 }
 
 #[cfg(not(windows))]
 pub use fallback::{
     GlobalMouseEvent, GlobalMouseWatcher, next_windows_dark_mode, set_windows_dark_mode,
-    windows_main_dark_mode, work_area_near_cursor,
+    show_error_message, windows_main_dark_mode, work_area_near_cursor,
 };

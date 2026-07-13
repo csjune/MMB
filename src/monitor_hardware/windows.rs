@@ -2,6 +2,7 @@ mod ddc;
 mod display_config;
 mod wmi;
 
+use std::collections::HashSet;
 use std::fmt;
 
 use windows_sys::Win32::Foundation::GetLastError;
@@ -111,32 +112,71 @@ impl MonitorController {
 
     pub fn refresh(&mut self) -> Result<RefreshResult, MonitorError> {
         let mut warnings = Vec::new();
-        let (active_paths, active_paths_complete) = match display_config::active_display_paths() {
-            Ok(paths) => (paths, true),
+        let active_paths = match display_config::active_display_paths() {
+            Ok(paths) => paths,
             Err(error) => {
                 warnings.push(format!("failed to query active display paths: {error}"));
-                (display_config::ActiveDisplayPaths::default(), false)
+                display_config::ActiveDisplayPaths::default()
             }
         };
         warnings.extend(active_paths.warnings.iter().cloned());
 
-        let ddc_discovery = ddc::discover(&active_paths)?;
-        warnings.extend(ddc_discovery.warnings);
-        let mut monitors = ddc_discovery
-            .monitors
-            .into_iter()
-            .map(|monitor| Monitor::Ddc(Box::new(monitor)))
-            .collect::<Vec<_>>();
+        let mut monitors = Vec::new();
+        let mut successful_backends = 0;
+        let mut backend_errors = Vec::new();
 
-        if active_paths_complete {
-            match wmi::discover(&active_paths) {
-                Ok(discovery) => {
-                    warnings.extend(discovery.warnings);
-                    monitors.extend(discovery.monitors.into_iter().map(Monitor::Wmi));
-                }
-                Err(error) => warnings.push(format!("failed to refresh WMI monitors: {error}")),
+        match ddc::discover(&active_paths) {
+            Ok(discovery) => {
+                successful_backends += 1;
+                warnings.extend(discovery.warnings);
+                monitors.extend(
+                    discovery
+                        .monitors
+                        .into_iter()
+                        .map(|monitor| Monitor::Ddc(Box::new(monitor))),
+                );
+            }
+            Err(error) => {
+                let error = format!("failed to refresh DDC monitors: {error}");
+                warnings.push(error.clone());
+                backend_errors.push(error);
             }
         }
+
+        let active_filter = active_paths.is_complete().then_some(&active_paths);
+        match wmi::discover(active_filter) {
+            Ok(discovery) => {
+                successful_backends += 1;
+                warnings.extend(discovery.warnings);
+                monitors.extend(discovery.monitors.into_iter().map(Monitor::Wmi));
+            }
+            Err(error) => {
+                let error = format!("failed to refresh WMI monitors: {error}");
+                warnings.push(error.clone());
+                backend_errors.push(error);
+            }
+        }
+
+        if successful_backends == 0 {
+            return Err(MonitorError::InvalidData {
+                context: "monitor discovery failed",
+                details: backend_errors.join("; "),
+            });
+        }
+
+        let mut monitor_ids = HashSet::new();
+        monitors.retain(|monitor| {
+            if monitor_ids.insert(monitor.id().clone()) {
+                true
+            } else {
+                warnings.push(format!(
+                    "ignored duplicate monitor id {} ({})",
+                    monitor.id(),
+                    monitor.name()
+                ));
+                false
+            }
+        });
 
         self.monitors = monitors;
         self.generation = self.generation.wrapping_add(1).max(1);

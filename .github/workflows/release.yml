@@ -21,6 +21,8 @@ jobs:
   release-windows:
     name: Release Windows
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
     steps:
       - name: Checkout
@@ -32,6 +34,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw "Invalid release tag: $env:RELEASE_TAG"
+          }
+
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $package = $metadata.packages | Where-Object { $_.name -eq "mmb" } | Select-Object -First 1
+          if ($null -eq $package) {
+            throw "MMB package was not found in cargo metadata"
+          }
+
+          $expectedTag = "v$($package.version)"
+          if ($env:RELEASE_TAG -cne $expectedTag) {
+            throw "Release tag $env:RELEASE_TAG does not match Cargo package version $expectedTag"
+          }
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -62,9 +82,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
-          if (gh release view $tag --repo "${{ github.repository }}" *> $null) {
-            gh release upload $tag dist/mmb.exe --repo "${{ github.repository }}" --clobber
+          if (gh release view $env:RELEASE_TAG --repo "${{ github.repository }}" *> $null) {
+            gh release upload $env:RELEASE_TAG dist/mmb.exe --repo "${{ github.repository }}" --clobber
           } else {
-            gh release create $tag dist/mmb.exe --repo "${{ github.repository }}" --title "MMB $tag" --generate-notes --verify-tag
+            gh release create $env:RELEASE_TAG dist/mmb.exe --repo "${{ github.repository }}" --title "MMB $env:RELEASE_TAG" --generate-notes --verify-tag
           }

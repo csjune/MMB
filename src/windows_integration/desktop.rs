@@ -7,6 +7,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 
 use super::WorkArea;
 
@@ -51,6 +52,19 @@ pub fn work_area_near_cursor() -> Option<WorkArea> {
     }
 }
 
+pub fn show_error_message(title: &str, message: &str) {
+    let title = wide_null(title);
+    let message = wide_null(message);
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 fn scale_factor_for_monitor(monitor: HMONITOR) -> f32 {
     let mut dpi_x = 96u32;
     let mut dpi_y = 96u32;
@@ -61,4 +75,8 @@ fn scale_factor_for_monitor(monitor: HMONITOR) -> f32 {
     } else {
         1.0
     }
+}
+
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
 }

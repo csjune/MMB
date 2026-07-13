@@ -18,6 +18,9 @@ enum MonitorCommand {
 }
 
 pub(crate) enum MonitorEvent {
+    Started {
+        request_id: u64,
+    },
     Refreshed {
         request_id: u64,
         apply_report: Option<ApplyReport>,
@@ -47,6 +50,18 @@ impl MonitorWorker {
             let mut controller = MonitorController::new();
 
             while let Ok(command) = command_receiver.recv() {
+                let request_id = match &command {
+                    MonitorCommand::Refresh { request_id }
+                    | MonitorCommand::Apply { request_id, .. }
+                    | MonitorCommand::ApplyThenRefresh { request_id, .. } => *request_id,
+                };
+                if event_sender
+                    .send(MonitorEvent::Started { request_id })
+                    .is_err()
+                {
+                    break;
+                }
+
                 let event = match command {
                     MonitorCommand::Refresh { request_id } => MonitorEvent::Refreshed {
                         request_id,
