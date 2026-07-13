@@ -14,6 +14,9 @@ mod desktop;
 #[path = "windows_integration/mouse_hook.rs"]
 mod mouse_hook;
 #[cfg(windows)]
+#[path = "windows_integration/single_instance.rs"]
+mod single_instance;
+#[cfg(windows)]
 #[path = "windows_integration/theme.rs"]
 mod theme;
 
@@ -21,6 +24,8 @@ mod theme;
 pub use desktop::{show_error_message, work_area_near_cursor};
 #[cfg(windows)]
 pub use mouse_hook::{GlobalMouseEvent, GlobalMouseWatcher};
+#[cfg(windows)]
+pub use single_instance::acquire_single_instance;
 #[cfg(windows)]
 pub use theme::{next_windows_dark_mode, set_windows_dark_mode, windows_main_dark_mode};
 
@@ -40,6 +45,8 @@ mod fallback {
     }
 
     pub struct GlobalMouseWatcher;
+
+    pub struct SingleInstanceGuard;
 
     impl GlobalMouseWatcher {
         pub fn new() -> Result<Self, WindowsIntegrationError> {
@@ -76,6 +83,10 @@ mod fallback {
         None
     }
 
+    pub fn acquire_single_instance() -> std::io::Result<Option<SingleInstanceGuard>> {
+        Ok(Some(SingleInstanceGuard))
+    }
+
     pub fn windows_main_dark_mode() -> Result<bool, WindowsIntegrationError> {
         Err(WindowsIntegrationError)
     }
@@ -95,6 +106,6 @@ mod fallback {
 
 #[cfg(not(windows))]
 pub use fallback::{
-    GlobalMouseEvent, GlobalMouseWatcher, next_windows_dark_mode, set_windows_dark_mode,
-    show_error_message, windows_main_dark_mode, work_area_near_cursor,
+    GlobalMouseEvent, GlobalMouseWatcher, acquire_single_instance, next_windows_dark_mode,
+    set_windows_dark_mode, show_error_message, windows_main_dark_mode, work_area_near_cursor,
 };

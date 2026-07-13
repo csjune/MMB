@@ -40,6 +40,18 @@ fn main() {
         process::exit(exit_code);
     }
 
+    let _single_instance = match windows_integration::acquire_single_instance() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return,
+        Err(error) => {
+            windows_integration::show_error_message(
+                "MMB couldn't start",
+                &format!("MMB couldn't enforce single-instance mode.\n\n{error}"),
+            );
+            process::exit(1);
+        }
+    };
+
     if let Err(error) = run_app() {
         windows_integration::show_error_message(
             "MMB couldn't start",
@@ -63,6 +75,7 @@ fn run_app() -> Result<(), Box<dyn Error>> {
 
     let app = AppController::new()?;
     app.show_tray()?;
+    app.request_refresh();
     slint::run_event_loop()?;
     Ok(())
 }
@@ -82,6 +95,9 @@ struct AppController {
     refresh_after_stall: Cell<bool>,
     pending_worker_requests: RefCell<PendingWorkerRequests>,
     monitor_service_stalled: Cell<bool>,
+    refreshing: Cell<bool>,
+    sync_all: Cell<bool>,
+    status_message: RefCell<SharedString>,
     theme_change_in_flight: Cell<bool>,
     dark_mode: Cell<bool>,
     tray: TrayIcon,
@@ -129,6 +145,9 @@ impl AppController {
             refresh_after_stall: Cell::new(false),
             pending_worker_requests: RefCell::new(PendingWorkerRequests::default()),
             monitor_service_stalled: Cell::new(false),
+            refreshing: Cell::new(false),
+            sync_all: Cell::new(false),
+            status_message: RefCell::new(SharedString::default()),
             theme_change_in_flight: Cell::new(false),
             dark_mode: Cell::new(initial_dark_mode),
             tray,
@@ -176,9 +195,10 @@ impl AppController {
         popup.set_monitors(ModelRc::new(state.model()));
         popup.set_has_monitors(state.has_monitors());
         popup.set_dark_mode(self.dark_mode.get());
-        popup.set_refreshing(false);
-        popup.set_theme_changing(false);
-        popup.set_status_message(SharedString::default());
+        popup.set_refreshing(self.refreshing.get());
+        popup.set_sync_all(self.sync_all.get());
+        popup.set_theme_changing(self.theme_change_in_flight.get());
+        popup.set_status_message(self.status_message.borrow().clone());
         drop(state);
         let app = Rc::downgrade(self);
         popup.window().on_close_requested(move || {
@@ -221,6 +241,7 @@ impl AppController {
     }
 
     fn toggle_popup(self: &Rc<Self>) -> Result<(), slint::PlatformError> {
+        self.discard_hidden_popup();
         if self.popup.borrow().is_none() {
             self.popup.replace(Some(self.create_popup()?));
         }
@@ -258,7 +279,6 @@ impl AppController {
             position_epoch,
         );
         self.start_outside_click_watcher();
-        self.request_refresh();
         Ok(())
     }
 
@@ -267,7 +287,9 @@ impl AppController {
             .popup
             .borrow()
             .as_ref()
-            .is_some_and(MainWindow::get_sync_all);
+            .map(MainWindow::get_sync_all)
+            .unwrap_or_else(|| self.sync_all.get());
+        self.sync_all.set(sync_all);
         let has_monitors = {
             let mut state = self.monitor_state.borrow_mut();
             state.update_brightness(monitor_id.as_str(), value, sync_all);
@@ -553,10 +575,13 @@ impl AppController {
     }
 
     fn set_status_message(&self, message: &str) {
-        self.with_popup(|popup| popup.set_status_message(message.into()));
+        let message: SharedString = message.into();
+        self.status_message.replace(message.clone());
+        self.with_popup(|popup| popup.set_status_message(message));
     }
 
     fn set_refreshing(&self, refreshing: bool) {
+        self.refreshing.set(refreshing);
         self.with_popup(|popup| popup.set_refreshing(refreshing));
     }
 
@@ -642,9 +667,23 @@ impl AppController {
     }
 
     fn hide_popup(&self, popup: &MainWindow) {
+        self.sync_all.set(popup.get_sync_all());
         popup.hide().ok();
         self.stop_outside_click_watcher();
         self.invalidate_popup_position();
+    }
+
+    fn discard_hidden_popup(&self) {
+        let sync_all = {
+            let popup_ref = self.popup.borrow();
+            popup_ref
+                .as_ref()
+                .and_then(|popup| (!popup.window().is_visible()).then(|| popup.get_sync_all()))
+        };
+        if let Some(sync_all) = sync_all {
+            self.sync_all.set(sync_all);
+            self.popup.replace(None);
+        }
     }
 
     fn poll_outside_click(&self) {
