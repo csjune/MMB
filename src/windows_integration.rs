@@ -27,7 +27,10 @@ pub use mouse_hook::{GlobalMouseEvent, GlobalMouseWatcher};
 #[cfg(windows)]
 pub use single_instance::acquire_single_instance;
 #[cfg(windows)]
-pub use theme::{next_windows_dark_mode, set_windows_dark_mode, windows_main_dark_mode};
+pub use theme::{
+    WindowsThemeWatcher, next_windows_dark_mode, set_process_menu_dark_mode, set_windows_dark_mode,
+    windows_main_dark_mode,
+};
 
 #[cfg(not(windows))]
 mod fallback {
@@ -99,6 +102,8 @@ mod fallback {
         Err(WindowsIntegrationError)
     }
 
+    pub fn set_process_menu_dark_mode(_dark_mode: bool) {}
+
     pub fn show_error_message(title: &str, message: &str) {
         eprintln!("{title}: {message}");
     }
@@ -107,5 +112,6 @@ mod fallback {
 #[cfg(not(windows))]
 pub use fallback::{
     GlobalMouseEvent, GlobalMouseWatcher, acquire_single_instance, next_windows_dark_mode,
-    set_windows_dark_mode, show_error_message, windows_main_dark_mode, work_area_near_cursor,
+    set_process_menu_dark_mode, set_windows_dark_mode, show_error_message, windows_main_dark_mode,
+    work_area_near_cursor,
 };

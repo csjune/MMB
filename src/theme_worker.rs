@@ -15,6 +15,7 @@ enum ThemeCommand {
 }
 
 pub(crate) enum ThemeEvent {
+    Changed(Result<bool, String>),
     Toggled(Result<bool, String>),
 }
 
@@ -27,6 +28,7 @@ impl ThemeWorker {
     pub(crate) fn new() -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
+        let watcher_event_sender = event_sender.clone();
         thread::spawn(move || {
             while let Ok(ThemeCommand::Toggle) = command_receiver.recv() {
                 let result = windows_integration::next_windows_dark_mode()
@@ -41,6 +43,7 @@ impl ThemeWorker {
                 }
             }
         });
+        spawn_theme_watcher(watcher_event_sender);
 
         Self {
             commands: command_sender,
@@ -57,6 +60,38 @@ impl ThemeWorker {
     pub(crate) fn try_recv(&self) -> Result<ThemeEvent, TryRecvError> {
         self.events.try_recv()
     }
+}
+
+fn spawn_theme_watcher(event_sender: Sender<ThemeEvent>) {
+    #[cfg(windows)]
+    thread::spawn(move || {
+        let watcher = match windows_integration::WindowsThemeWatcher::new() {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                let _ = event_sender.send(ThemeEvent::Changed(Err(error.to_string())));
+                return;
+            }
+        };
+
+        loop {
+            let result = watcher
+                .wait_for_change()
+                .and_then(|()| windows_integration::windows_main_dark_mode());
+            let stop = result.is_err();
+            if event_sender
+                .send(ThemeEvent::Changed(
+                    result.map_err(|error| error.to_string()),
+                ))
+                .is_err()
+                || stop
+            {
+                break;
+            }
+        }
+    });
+
+    #[cfg(not(windows))]
+    drop(event_sender);
 }
 
 pub(crate) fn run_theme_helper_if_requested() -> Option<i32> {

@@ -75,6 +75,7 @@ fn run_app() -> Result<(), Box<dyn Error>> {
 
     let app = AppController::new()?;
     app.show_tray()?;
+    app.start_theme_event_polling();
     app.request_refresh();
     slint::run_event_loop()?;
     Ok(())
@@ -116,6 +117,7 @@ impl AppController {
         let tray_light_icon = build_icon(TRAY_ICON_LIGHT_ICO);
         let tray_dark_icon = build_icon(TRAY_ICON_DARK_ICO);
         let initial_dark_mode = windows_integration::windows_main_dark_mode()?;
+        windows_integration::set_process_menu_dark_mode(initial_dark_mode);
         let tray = TrayIcon::new()?;
         tray.set_app_icon(tray_icon_for_dark_mode(
             initial_dark_mode,
@@ -254,11 +256,7 @@ impl AppController {
         }
 
         match windows_integration::windows_main_dark_mode() {
-            Ok(current_dark_mode) => {
-                self.dark_mode.set(current_dark_mode);
-                popup.set_dark_mode(current_dark_mode);
-                self.update_tray_icon(current_dark_mode);
-            }
+            Ok(current_dark_mode) => self.apply_windows_theme(current_dark_mode),
             Err(error) => windows_integration::show_error_message(
                 "MMB",
                 &format!("Couldn't read the current Windows theme.\n\n{error}"),
@@ -596,49 +594,64 @@ impl AppController {
             eprintln!("failed to queue Windows theme change: {error}");
             self.finish_theme_change();
             self.set_status_message("Couldn't change Windows theme.");
-            return;
         }
-
-        let app = Rc::downgrade(self);
-        self.theme_event_timer
-            .start(TimerMode::Repeated, Duration::from_millis(25), move || {
-                if let Some(app) = app.upgrade() {
-                    app.poll_theme_events();
-                }
-            });
     }
 
     fn poll_theme_events(&self) {
-        match self.theme_worker.try_recv() {
-            Ok(ThemeEvent::Toggled(Ok(dark_mode))) => {
-                self.dark_mode.set(dark_mode);
-                self.update_tray_icon(dark_mode);
-                self.with_popup(|popup| popup.set_dark_mode(dark_mode));
-                self.finish_theme_change();
-            }
-            Ok(ThemeEvent::Toggled(Err(error))) => {
-                eprintln!("failed to change Windows theme: {error}");
-                if let Ok(dark_mode) = windows_integration::windows_main_dark_mode() {
-                    self.dark_mode.set(dark_mode);
-                    self.update_tray_icon(dark_mode);
-                    self.with_popup(|popup| popup.set_dark_mode(dark_mode));
+        loop {
+            match self.theme_worker.try_recv() {
+                Ok(ThemeEvent::Changed(Ok(dark_mode))) => {
+                    self.apply_windows_theme(dark_mode);
                 }
-                self.finish_theme_change();
-                self.set_status_message("Couldn't change Windows theme.");
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                eprintln!("theme worker disconnected");
-                self.finish_theme_change();
-                self.set_status_message("Theme service stopped.");
+                Ok(ThemeEvent::Changed(Err(error))) => {
+                    eprintln!("Windows theme watcher stopped: {error}");
+                }
+                Ok(ThemeEvent::Toggled(Ok(dark_mode))) => {
+                    self.apply_windows_theme(dark_mode);
+                    self.finish_theme_change();
+                }
+                Ok(ThemeEvent::Toggled(Err(error))) => {
+                    eprintln!("failed to change Windows theme: {error}");
+                    if let Ok(dark_mode) = windows_integration::windows_main_dark_mode() {
+                        self.apply_windows_theme(dark_mode);
+                    }
+                    self.finish_theme_change();
+                    self.set_status_message("Couldn't change Windows theme.");
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    eprintln!("theme worker disconnected");
+                    self.theme_event_timer.stop();
+                    self.finish_theme_change();
+                    self.set_status_message("Theme service stopped.");
+                    break;
+                }
             }
         }
     }
 
     fn finish_theme_change(&self) {
         self.theme_change_in_flight.set(false);
-        self.theme_event_timer.stop();
         self.with_popup(|popup| popup.set_theme_changing(false));
+    }
+
+    fn start_theme_event_polling(self: &Rc<Self>) {
+        let app = Rc::downgrade(self);
+        self.theme_event_timer
+            .start(TimerMode::Repeated, Duration::from_millis(100), move || {
+                if let Some(app) = app.upgrade() {
+                    app.poll_theme_events();
+                }
+            });
+    }
+
+    fn apply_windows_theme(&self, dark_mode: bool) {
+        if self.dark_mode.replace(dark_mode) == dark_mode {
+            return;
+        }
+        windows_integration::set_process_menu_dark_mode(dark_mode);
+        self.update_tray_icon(dark_mode);
+        self.with_popup(|popup| popup.set_dark_mode(dark_mode));
     }
 
     fn update_tray_icon(&self, dark_mode: bool) {

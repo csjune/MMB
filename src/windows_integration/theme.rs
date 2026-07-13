@@ -1,11 +1,15 @@
 use std::fmt;
 use std::mem;
 use std::ptr;
+use std::sync::OnceLock;
 
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HWND, LPARAM};
-use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FreeLibrary, HWND, LPARAM,
+};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD, RegDeleteKeyValueW, RegGetValueW,
+    HKEY, HKEY_CURRENT_USER, KEY_NOTIFY, REG_DWORD, REG_NOTIFY_CHANGE_LAST_SET, RRF_RT_REG_DWORD,
+    RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegNotifyChangeKeyValue, RegOpenKeyExW,
     RegSetKeyValueW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -29,6 +33,10 @@ const THEME_MESSAGES: [u32; 3] = [
     WM_SYSCOLORCHANGE,
     WM_DWMCOLORIZATIONCOLORCHANGED,
 ];
+const SET_PREFERRED_APP_MODE_ORDINAL: usize = 135;
+const FLUSH_MENU_THEMES_ORDINAL: usize = 136;
+const PREFERRED_APP_MODE_FORCE_DARK: i32 = 2;
+const PREFERRED_APP_MODE_FORCE_LIGHT: i32 = 3;
 
 #[derive(Debug)]
 pub struct WindowsIntegrationError {
@@ -48,6 +56,103 @@ impl std::error::Error for WindowsIntegrationError {}
 struct WindowsThemeState {
     apps_dark_mode: bool,
     system_dark_mode: bool,
+}
+
+pub struct WindowsThemeWatcher {
+    key: HKEY,
+}
+
+impl WindowsThemeWatcher {
+    pub fn new() -> Result<Self, WindowsIntegrationError> {
+        let subkey = wide_null(THEME_REGISTRY_SUBKEY);
+        let mut key = ptr::null_mut();
+        let status =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_NOTIFY, &mut key) };
+        if status == ERROR_SUCCESS {
+            Ok(Self { key })
+        } else {
+            Err(WindowsIntegrationError {
+                context: "RegOpenKeyExW theme watcher failed",
+                code: status,
+            })
+        }
+    }
+
+    pub fn wait_for_change(&self) -> Result<(), WindowsIntegrationError> {
+        let status = unsafe {
+            RegNotifyChangeKeyValue(self.key, 0, REG_NOTIFY_CHANGE_LAST_SET, ptr::null_mut(), 0)
+        };
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(WindowsIntegrationError {
+                context: "RegNotifyChangeKeyValue failed",
+                code: status,
+            })
+        }
+    }
+}
+
+impl Drop for WindowsThemeWatcher {
+    fn drop(&mut self) {
+        unsafe {
+            RegCloseKey(self.key);
+        }
+    }
+}
+
+type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+type FlushMenuThemes = unsafe extern "system" fn();
+
+struct MenuThemeApi {
+    set_preferred_app_mode: SetPreferredAppMode,
+    flush_menu_themes: FlushMenuThemes,
+}
+
+pub fn set_process_menu_dark_mode(dark_mode: bool) {
+    let Some(api) = menu_theme_api() else {
+        return;
+    };
+    let mode = if dark_mode {
+        PREFERRED_APP_MODE_FORCE_DARK
+    } else {
+        PREFERRED_APP_MODE_FORCE_LIGHT
+    };
+    unsafe {
+        (api.set_preferred_app_mode)(mode);
+        (api.flush_menu_themes)();
+    }
+}
+
+fn menu_theme_api() -> Option<&'static MenuThemeApi> {
+    static API: OnceLock<Option<MenuThemeApi>> = OnceLock::new();
+    API.get_or_init(load_menu_theme_api).as_ref()
+}
+
+fn load_menu_theme_api() -> Option<MenuThemeApi> {
+    let library_name = wide_null("uxtheme.dll");
+    let module = unsafe { LoadLibraryW(library_name.as_ptr()) };
+    if module.is_null() {
+        return None;
+    }
+
+    let set_mode = unsafe { GetProcAddress(module, SET_PREFERRED_APP_MODE_ORDINAL as *const u8) };
+    let flush = unsafe { GetProcAddress(module, FLUSH_MENU_THEMES_ORDINAL as *const u8) };
+    let (Some(set_mode), Some(flush)) = (set_mode, flush) else {
+        unsafe {
+            FreeLibrary(module);
+        }
+        return None;
+    };
+
+    Some(MenuThemeApi {
+        set_preferred_app_mode: unsafe {
+            mem::transmute::<unsafe extern "system" fn() -> isize, SetPreferredAppMode>(set_mode)
+        },
+        flush_menu_themes: unsafe {
+            mem::transmute::<unsafe extern "system" fn() -> isize, FlushMenuThemes>(flush)
+        },
+    })
 }
 
 pub fn windows_main_dark_mode() -> Result<bool, WindowsIntegrationError> {
