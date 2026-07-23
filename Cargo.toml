@@ -1,12 +1,16 @@
+[workspace]
+members = ["crates/monitor-control"]
+resolver = "3"
+
 [package]
 name = "mmb"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 build = "build.rs"
 description = "Multi Monitor Brightness"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
+monitor-control = { path = "crates/monitor-control" }
 slint = { version = "1.17", default-features = false, features = [
     "std",
     "backend-winit",
@@ -17,7 +21,6 @@ slint = { version = "1.17", default-features = false, features = [
     "compat-1-2",
 ] }
 windows-sys = { version = ">=0.59, <=0.61", features = [
-    "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",
@@ -28,7 +31,6 @@ windows-sys = { version = ">=0.59, <=0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
-wmi = { version = "0.18.4", default-features = false }
 
 [build-dependencies]
 slint-build = "1.17"

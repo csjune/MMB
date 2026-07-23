@@ -4,7 +4,7 @@ use std::rc::Rc;
 use slint::{Model, VecModel};
 
 use crate::MonitorEntry;
-use crate::monitor_hardware::{ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot};
+use monitor_control::{ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot};
 
 pub(crate) struct MonitorState {
     generation: u64,
@@ -35,7 +35,7 @@ impl MonitorState {
         let entries: Vec<MonitorEntry> = snapshots
             .into_iter()
             .map(|monitor| MonitorEntry {
-                id: monitor.id.to_ui().into(),
+                id: monitor.id.as_str().into(),
                 name: monitor.name.into(),
                 brightness: monitor.brightness,
             })
@@ -78,7 +78,7 @@ impl MonitorState {
             let Some(confirmed) = self.confirmed.get(&update.id).copied() else {
                 continue;
             };
-            let Some(row) = self.row_for_monitor(update.id.to_ui()) else {
+            let Some(row) = self.row_for_monitor(update.id.as_str()) else {
                 continue;
             };
             let Some(mut entry) = self.model.row_data(row) else {
@@ -115,7 +115,7 @@ impl MonitorState {
                 continue;
             }
 
-            let Some(row) = self.row_for_monitor(outcome.id.to_ui()) else {
+            let Some(row) = self.row_for_monitor(outcome.id.as_str()) else {
                 continue;
             };
             let Some(mut entry) = self.model.row_data(row) else {
@@ -162,7 +162,7 @@ impl MonitorState {
     fn set_row_brightness(&mut self, row: usize, value: i32) {
         if let Some(mut entry) = self.model.row_data(row) {
             entry.brightness = value;
-            let monitor_id = MonitorId::from_ui(entry.id.as_str());
+            let monitor_id = MonitorId::new(entry.id.as_str());
             self.model.set_row_data(row, entry);
             self.pending.insert(monitor_id, value);
         }
@@ -183,7 +183,7 @@ mod tests {
     use slint::Model;
 
     use super::{MonitorState, brightness_after_scroll};
-    use crate::monitor_hardware::{ApplyOutcome, ApplyReport, MonitorId, MonitorSnapshot};
+    use monitor_control::{ApplyOutcome, ApplyReport, MonitorId, MonitorSnapshot};
 
     #[test]
     fn scroll_snaps_to_the_next_five_percent_step() {
@@ -211,7 +211,7 @@ mod tests {
                 brightness: 40,
             }],
         );
-        state.update_brightness(id.to_ui(), 75, false);
+        state.update_brightness(id.as_str(), 75, false);
         state.take_pending();
 
         let errors = state.reconcile_apply_report(ApplyReport {
@@ -240,9 +240,9 @@ mod tests {
                 brightness: 40,
             }],
         );
-        state.update_brightness(id.to_ui(), 75, false);
+        state.update_brightness(id.as_str(), 75, false);
         state.take_pending();
-        state.update_brightness(id.to_ui(), 80, false);
+        state.update_brightness(id.as_str(), 80, false);
 
         state.reconcile_apply_report(ApplyReport {
             outcomes: vec![ApplyOutcome {
@@ -269,7 +269,7 @@ mod tests {
                 brightness: 40,
             }],
         );
-        state.update_brightness(id.to_ui(), 75, false);
+        state.update_brightness(id.as_str(), 75, false);
         let updates = state.take_pending();
 
         state.restore_unsent(&updates);

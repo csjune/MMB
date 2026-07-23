@@ -50,6 +50,7 @@ component BrightnessSlider inherits Rectangle {
     private property <length> tick-width: 2px;
     private property <length> tick-height: 7px;
     private property <length> tick-y: 26px;
+    private property <float> step-size: 5;
 
     Rectangle {
         x: root.tick-x(0);
@@ -96,7 +97,7 @@ component BrightnessSlider inherits Rectangle {
         height: root.slider-height;
         minimum: 0;
         maximum: 100;
-        step: 1;
+        step: root.step-size;
         value: root.value;
         accessible-label: root.accessible-name;
 
@@ -136,7 +137,7 @@ component BrightnessSlider inherits Rectangle {
             return 0;
         }
 
-        return max(0, min(100, position * 100 / range));
+        return max(0, min(100, round(position * 100 / range / root.step-size) * root.step-size));
     }
 
     pure function tick-x(value: float) -> length {
@@ -447,9 +448,10 @@ export component MainWindow inherits Window {
 
 export component TrayIcon inherits SystemTrayIcon {
     in property <image> app-icon;
+    in property <string> app-version;
 
     icon: root.app-icon;
-    tooltip: "MMB";
+    tooltip: "MMB \{root.app-version}";
     title: "MMB";
 
     clicked => {

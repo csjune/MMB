@@ -57,13 +57,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: cargo clippy --release --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --release --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --release --locked
+        run: cargo test --workspace --release --locked
 
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release --locked -p mmb
 
       - name: Package Windows binary
         shell: pwsh

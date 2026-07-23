@@ -2,15 +2,11 @@
 pub struct MonitorId(String);
 
 impl MonitorId {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
+    pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
-    pub(crate) fn from_ui(value: &str) -> Self {
-        Self(value.to_string())
-    }
-
-    pub(crate) fn to_ui(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -57,7 +53,7 @@ pub struct ApplyReport {
 }
 
 #[cfg(windows)]
-#[path = "monitor_hardware/windows.rs"]
+#[path = "windows/mod.rs"]
 mod platform;
 
 #[cfg(not(windows))]
@@ -78,6 +74,12 @@ mod platform {
     impl std::error::Error for MonitorError {}
 
     pub struct MonitorController;
+
+    impl Default for MonitorController {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 
     impl MonitorController {
         pub fn new() -> Self {
@@ -109,4 +111,4 @@ mod platform {
     }
 }
 
-pub use platform::MonitorController;
+pub use platform::{MonitorController, MonitorError};

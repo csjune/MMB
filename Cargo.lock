@@ -2562,13 +2562,21 @@ dependencies = [
 
 [[package]]
 name = "mmb"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
- "serde",
+ "monitor-control",
  "slint",
  "slint-build",
  "windows-sys 0.61.2",
  "winresource",
+]
+
+[[package]]
+name = "monitor-control"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "windows-sys 0.61.2",
  "wmi",
 ]
 

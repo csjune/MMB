@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
-use crate::monitor_hardware::{ApplyReport, BrightnessUpdate, MonitorController, RefreshResult};
+use monitor_control::{ApplyReport, BrightnessUpdate, MonitorController, RefreshResult};
 
 enum MonitorCommand {
     Refresh {

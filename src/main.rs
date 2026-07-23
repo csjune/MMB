@@ -1,6 +1,5 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod monitor_hardware;
 mod monitor_state;
 mod monitor_worker;
 mod theme_worker;
@@ -21,7 +20,7 @@ use slint::{
     SharedString, Timer, TimerMode,
 };
 
-use monitor_hardware::{ApplyReport, RefreshResult};
+use monitor_control::{ApplyReport, BrightnessUpdate, RefreshResult};
 use monitor_state::{MonitorState, brightness_after_scroll};
 use monitor_worker::{MonitorEvent, MonitorWorker};
 use theme_worker::{ThemeEvent, ThemeWorker};
@@ -119,6 +118,7 @@ impl AppController {
         let initial_dark_mode = windows_integration::windows_main_dark_mode()?;
         windows_integration::set_process_menu_dark_mode(initial_dark_mode);
         let tray = TrayIcon::new()?;
+        tray.set_app_version(env!("CARGO_PKG_VERSION").into());
         tray.set_app_icon(tray_icon_for_dark_mode(
             initial_dark_mode,
             &tray_light_icon,
@@ -381,7 +381,7 @@ impl AppController {
         }
     }
 
-    fn request_apply(self: &Rc<Self>, updates: Vec<monitor_hardware::BrightnessUpdate>) {
+    fn request_apply(self: &Rc<Self>, updates: Vec<BrightnessUpdate>) {
         let request_id = self.next_request_id();
         let tracked_updates = updates.clone();
         match self.monitor_worker.borrow().apply(request_id, updates) {
@@ -402,11 +402,7 @@ impl AppController {
         request_id
     }
 
-    fn track_worker_request(
-        self: &Rc<Self>,
-        request_id: u64,
-        updates: Vec<monitor_hardware::BrightnessUpdate>,
-    ) {
+    fn track_worker_request(self: &Rc<Self>, request_id: u64, updates: Vec<BrightnessUpdate>) {
         let mut pending = self.pending_worker_requests.borrow_mut();
         let should_start_timer = pending.is_empty();
         pending.track(request_id, updates);
@@ -758,7 +754,7 @@ struct RefreshRequestState {
 struct PendingWorkerRequest {
     started_at: Option<Instant>,
     timed_out: bool,
-    updates: Vec<monitor_hardware::BrightnessUpdate>,
+    updates: Vec<BrightnessUpdate>,
 }
 
 #[derive(Default)]
@@ -767,7 +763,7 @@ struct PendingWorkerRequests {
 }
 
 impl PendingWorkerRequests {
-    fn track(&mut self, request_id: u64, updates: Vec<monitor_hardware::BrightnessUpdate>) {
+    fn track(&mut self, request_id: u64, updates: Vec<BrightnessUpdate>) {
         self.requests.insert(
             request_id,
             PendingWorkerRequest {
@@ -805,7 +801,7 @@ impl PendingWorkerRequests {
         })
     }
 
-    fn take_updates(&mut self) -> Vec<monitor_hardware::BrightnessUpdate> {
+    fn take_updates(&mut self) -> Vec<BrightnessUpdate> {
         std::mem::take(&mut self.requests)
             .into_values()
             .flat_map(|request| request.updates)
@@ -1014,7 +1010,7 @@ fn tray_icon_for_dark_mode(dark_mode: bool, light_icon: &Image, dark_icon: &Imag
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::monitor_hardware::{BrightnessUpdate, MonitorId};
+    use monitor_control::{BrightnessUpdate, MonitorId};
 
     use super::{
         PendingWorkerRequests, PopupLayoutMetrics, RefreshRequestState, clamp_to_work_area,
@@ -1101,7 +1097,7 @@ mod tests {
         );
         let updates = requests.take_updates();
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].id.to_ui(), "monitor-a");
+        assert_eq!(updates[0].id.as_str(), "monitor-a");
         assert!(requests.is_empty());
     }
 
