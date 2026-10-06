@@ -2575,9 +2575,11 @@ dependencies = [
 name = "monitor-control"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "windows-sys 0.61.2",
  "wmi",
+ "zbus",
 ]
 
 [[package]]
