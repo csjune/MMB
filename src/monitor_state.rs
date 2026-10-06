@@ -4,7 +4,7 @@ use std::rc::Rc;
 use slint::{Model, VecModel};
 
 use crate::MonitorEntry;
-use monitor_control::{ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot};
+use monbcon::{ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot};
 
 pub(crate) struct MonitorState {
     generation: u64,
@@ -183,7 +183,7 @@ mod tests {
     use slint::Model;
 
     use super::{MonitorState, brightness_after_scroll};
-    use monitor_control::{ApplyOutcome, ApplyReport, MonitorId, MonitorSnapshot};
+    use monbcon::{ApplyOutcome, ApplyReport, MonitorId, MonitorSnapshot};
 
     #[test]
     fn scroll_snaps_to_the_next_five_percent_step() {

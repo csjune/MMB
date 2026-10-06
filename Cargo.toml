@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/monitor-control"]
+members = ["crates/monbcon"]
 resolver = "3"
 
 [package]
@@ -10,7 +10,7 @@ build = "build.rs"
 description = "Multi Monitor Brightness"
 
 [dependencies]
-monitor-control = { path = "crates/monitor-control" }
+monbcon = { path = "crates/monbcon" }
 slint = { version = "1.17", default-features = false, features = [
     "std",
     "backend-winit",

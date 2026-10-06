@@ -20,7 +20,7 @@ use slint::{
     SharedString, Timer, TimerMode,
 };
 
-use monitor_control::{ApplyReport, BrightnessUpdate, RefreshResult};
+use monbcon::{ApplyReport, BrightnessUpdate, RefreshResult};
 use monitor_state::{MonitorState, brightness_after_scroll};
 use monitor_worker::{MonitorEvent, MonitorWorker};
 use theme_worker::{ThemeEvent, ThemeWorker};
@@ -1010,7 +1010,7 @@ fn tray_icon_for_dark_mode(dark_mode: bool, light_icon: &Image, dark_icon: &Imag
 mod tests {
     use std::time::{Duration, Instant};
 
-    use monitor_control::{BrightnessUpdate, MonitorId};
+    use monbcon::{BrightnessUpdate, MonitorId};
 
     use super::{
         PendingWorkerRequests, PopupLayoutMetrics, RefreshRequestState, clamp_to_work_area,
