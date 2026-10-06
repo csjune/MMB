@@ -1,7 +1,3 @@
-[workspace]
-members = ["crates/monbcon"]
-resolver = "3"
-
 [package]
 name = "mmb"
 version = "0.1.10"
@@ -10,7 +6,7 @@ build = "build.rs"
 description = "Multi Monitor Brightness"
 
 [dependencies]
-monbcon = { path = "crates/monbcon" }
+monbcon = { git = "https://github.com/csjune/monbcon", tag = "v0.1.0" }
 slint = { version = "1.17", default-features = false, features = [
     "std",
     "backend-winit",
