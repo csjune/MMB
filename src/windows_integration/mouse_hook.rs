@@ -14,17 +14,25 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetMessageW, MSG, MSLLHOOKSTRUCT, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN,
 };
+
+use super::tray::point_is_in_notification_area;
 
 const MOUSE_BUTTONS: [i32; 3] = [VK_LBUTTON as i32, VK_RBUTTON as i32, VK_MBUTTON as i32];
 
 static HOOK_STATE: OnceLock<HookState> = OnceLock::new();
 
+/// Receives `(x, y, wheel_delta)` for wheel events over the notification
+/// area. It runs on the hook thread, so it must return quickly.
+pub type NotificationAreaWheelHandler = Box<dyn Fn(i32, i32, i32) + Send + Sync>;
+
 struct HookState {
     events: SyncSender<GlobalMouseEvent>,
     next_click_id: AtomicU64,
     latest_click_id: Arc<AtomicU64>,
+    on_notification_area_wheel: NotificationAreaWheelHandler,
 }
 
 #[derive(Clone, Copy)]
@@ -62,7 +70,9 @@ struct PollingMouseWatcher {
 }
 
 impl GlobalMouseWatcher {
-    pub fn new() -> Result<Self, MouseWatcherError> {
+    pub fn new(
+        on_notification_area_wheel: NotificationAreaWheelHandler,
+    ) -> Result<Self, MouseWatcherError> {
         let (event_sender, event_receiver) = mpsc::sync_channel(64);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let latest_click_id = Arc::new(AtomicU64::new(0));
@@ -85,6 +95,7 @@ impl GlobalMouseWatcher {
                         events: event_sender,
                         next_click_id: AtomicU64::new(0),
                         latest_click_id: hook_latest_click_id,
+                        on_notification_area_wheel,
                     })
                     .is_err()
                 {
@@ -204,7 +215,16 @@ fn button_click_observed(was_pressed: bool, state: i16) -> bool {
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0
+    if code >= 0 && wparam as u32 == WM_MOUSEWHEEL {
+        let data = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+        let delta = wheel_delta(data.mouseData);
+        if delta != 0
+            && let Some(state) = HOOK_STATE.get()
+            && point_is_in_notification_area(data.pt.x, data.pt.y)
+        {
+            (state.on_notification_area_wheel)(data.pt.x, data.pt.y, delta);
+        }
+    } else if code >= 0
         && matches!(
             wparam as u32,
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
@@ -230,9 +250,22 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
 }
 
+/// The wheel delta lives in the high word of `mouseData`; positive values
+/// mean the wheel was rotated away from the user.
+fn wheel_delta(mouse_data: u32) -> i32 {
+    (mouse_data >> 16) as u16 as i16 as i32
+}
+
 #[cfg(test)]
 mod tests {
-    use super::button_click_observed;
+    use super::{button_click_observed, wheel_delta};
+
+    #[test]
+    fn wheel_delta_reads_the_signed_high_word() {
+        assert_eq!(wheel_delta(120 << 16), 120);
+        assert_eq!(wheel_delta(((-120i16) as u16 as u32) << 16), -120);
+        assert_eq!(wheel_delta(0x0000_ffff), 0);
+    }
 
     #[test]
     fn polling_detects_pressed_and_completed_clicks() {

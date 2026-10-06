@@ -125,8 +125,18 @@ impl AppController {
             &tray_dark_icon,
         ));
 
+        let tray_handle = tray.as_weak();
         let mouse_watcher =
-            windows_integration::GlobalMouseWatcher::new().unwrap_or_else(|error| {
+            windows_integration::GlobalMouseWatcher::new(Box::new(move |x, y, delta| {
+                // Called on the hook thread; the precise hit test talks to the
+                // shell, so it runs on the UI thread instead.
+                let _ = tray_handle.upgrade_in_event_loop(move |tray| {
+                    if windows_integration::point_is_over_tray_icon(x, y) {
+                        tray.invoke_scrolled(delta);
+                    }
+                });
+            }))
+            .unwrap_or_else(|error| {
                 eprintln!(
                     "failed to install outside-click watcher: {error}; using polling fallback"
                 );
@@ -148,7 +158,7 @@ impl AppController {
             pending_worker_requests: RefCell::new(PendingWorkerRequests::default()),
             monitor_service_stalled: Cell::new(false),
             refreshing: Cell::new(false),
-            sync_all: Cell::new(false),
+            sync_all: Cell::new(true),
             status_message: RefCell::new(SharedString::default()),
             theme_change_in_flight: Cell::new(false),
             dark_mode: Cell::new(initial_dark_mode),
@@ -178,6 +188,13 @@ impl AppController {
             }
             if let Err(error) = app.toggle_popup() {
                 eprintln!("failed to toggle popup: {error}");
+            }
+        });
+
+        let app = Rc::downgrade(self);
+        self.tray.on_scrolled(move |delta| {
+            if let Some(app) = app.upgrade() {
+                app.scroll_all_brightness(delta);
             }
         });
 
@@ -281,6 +298,30 @@ impl AppController {
     }
 
     fn update_brightness(self: &Rc<Self>, monitor_id: SharedString, value: i32) {
+        let sync_all = self.current_sync_all();
+        let has_monitors = {
+            let mut state = self.monitor_state.borrow_mut();
+            state.update_brightness(monitor_id.as_str(), value, sync_all);
+            state.has_monitors()
+        };
+        self.with_popup(|popup| popup.set_has_monitors(has_monitors));
+        self.update_tray_tooltip();
+        self.schedule_apply();
+    }
+
+    fn scroll_all_brightness(self: &Rc<Self>, delta: i32) {
+        // A refresh replaces every row and drops pending changes, and the
+        // popup hides its sliders meanwhile, so ignore the wheel as well.
+        if self.refreshing.get() {
+            return;
+        }
+        let sync_all = self.current_sync_all();
+        self.monitor_state.borrow_mut().scroll_all(delta, sync_all);
+        self.update_tray_tooltip();
+        self.schedule_apply();
+    }
+
+    fn current_sync_all(&self) -> bool {
         let sync_all = self
             .popup
             .borrow()
@@ -288,13 +329,12 @@ impl AppController {
             .map(MainWindow::get_sync_all)
             .unwrap_or_else(|| self.sync_all.get());
         self.sync_all.set(sync_all);
-        let has_monitors = {
-            let mut state = self.monitor_state.borrow_mut();
-            state.update_brightness(monitor_id.as_str(), value, sync_all);
-            state.has_monitors()
-        };
-        self.with_popup(|popup| popup.set_has_monitors(has_monitors));
-        self.schedule_apply();
+        sync_all
+    }
+
+    fn update_tray_tooltip(&self) {
+        let summary = self.monitor_state.borrow().brightness_summary();
+        self.tray.set_brightness_summary(summary.into());
     }
 
     fn scroll_brightness(self: &Rc<Self>, monitor_id: SharedString, delta: i32) {
@@ -374,6 +414,7 @@ impl AppController {
                 self.monitor_state
                     .borrow_mut()
                     .restore_unsent(&error.updates);
+                self.update_tray_tooltip();
                 self.refresh_requests.set(RefreshRequestState::default());
                 self.set_refreshing(false);
                 self.set_status_message("Couldn't refresh monitors.");
@@ -391,6 +432,7 @@ impl AppController {
                 self.monitor_state
                     .borrow_mut()
                     .restore_unsent(&error.updates);
+                self.update_tray_tooltip();
                 self.set_status_message("Couldn't change brightness.");
             }
         }
@@ -484,6 +526,7 @@ impl AppController {
                 self.monitor_state
                     .borrow_mut()
                     .replace_snapshots(result.generation, result.snapshots);
+                self.update_tray_tooltip();
                 self.set_status_message(if has_warnings {
                     "Some monitors couldn't be refreshed."
                 } else {
@@ -527,6 +570,7 @@ impl AppController {
             .monitor_state
             .borrow_mut()
             .reconcile_apply_report(report);
+        self.update_tray_tooltip();
         if errors.is_empty() {
             self.set_status_message("");
         } else {
@@ -558,6 +602,7 @@ impl AppController {
     fn restart_monitor_worker(self: &Rc<Self>, status_message: &str) {
         let updates = self.pending_worker_requests.borrow_mut().take_updates();
         self.monitor_state.borrow_mut().restore_unsent(&updates);
+        self.update_tray_tooltip();
         self.monitor_worker.replace(MonitorWorker::new());
         self.monitor_event_timer.stop();
         self.refresh_requests.set(RefreshRequestState::default());

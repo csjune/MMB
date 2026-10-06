@@ -19,6 +19,9 @@ mod single_instance;
 #[cfg(windows)]
 #[path = "windows_integration/theme.rs"]
 mod theme;
+#[cfg(windows)]
+#[path = "windows_integration/tray.rs"]
+mod tray;
 
 #[cfg(windows)]
 pub use desktop::{show_error_message, work_area_near_cursor};
@@ -31,6 +34,8 @@ pub use theme::{
     WindowsThemeWatcher, next_windows_dark_mode, set_process_menu_dark_mode, set_windows_dark_mode,
     windows_main_dark_mode,
 };
+#[cfg(windows)]
+pub use tray::point_is_over_tray_icon;
 
 #[cfg(not(windows))]
 mod fallback {
@@ -49,10 +54,14 @@ mod fallback {
 
     pub struct GlobalMouseWatcher;
 
+    pub type NotificationAreaWheelHandler = Box<dyn Fn(i32, i32, i32) + Send + Sync>;
+
     pub struct SingleInstanceGuard;
 
     impl GlobalMouseWatcher {
-        pub fn new() -> Result<Self, WindowsIntegrationError> {
+        pub fn new(
+            _on_notification_area_wheel: NotificationAreaWheelHandler,
+        ) -> Result<Self, WindowsIntegrationError> {
             Err(WindowsIntegrationError)
         }
 
@@ -86,6 +95,10 @@ mod fallback {
         None
     }
 
+    pub fn point_is_over_tray_icon(_x: i32, _y: i32) -> bool {
+        false
+    }
+
     pub fn acquire_single_instance() -> std::io::Result<Option<SingleInstanceGuard>> {
         Ok(Some(SingleInstanceGuard))
     }
@@ -112,6 +125,6 @@ mod fallback {
 #[cfg(not(windows))]
 pub use fallback::{
     GlobalMouseEvent, GlobalMouseWatcher, acquire_single_instance, next_windows_dark_mode,
-    set_process_menu_dark_mode, set_windows_dark_mode, show_error_message, windows_main_dark_mode,
-    work_area_near_cursor,
+    point_is_over_tray_icon, set_process_menu_dark_mode, set_windows_dark_mode, show_error_message,
+    windows_main_dark_mode, work_area_near_cursor,
 };

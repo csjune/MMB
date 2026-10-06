@@ -6,6 +6,8 @@ use slint::{Model, VecModel};
 use crate::MonitorEntry;
 use monbcon::{ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot};
 
+const TOOLTIP_NAME_MAX_CHARS: usize = 24;
+
 pub(crate) struct MonitorState {
     generation: u64,
     model: Rc<VecModel<MonitorEntry>>,
@@ -57,6 +59,56 @@ impl MonitorState {
         } else if let Some(row) = self.row_for_monitor(monitor_id) {
             self.set_row_brightness(row, value);
         }
+    }
+
+    /// Scrolls every monitor at once, as the tray icon has no single slider.
+    /// With sync enabled all monitors follow the first one; otherwise each
+    /// monitor steps from its own value.
+    pub(crate) fn scroll_all(&mut self, delta: i32, sync_all: bool) {
+        let Some(first) = self.model.row_data(0) else {
+            return;
+        };
+        let synced_value = brightness_after_scroll(first.brightness, delta);
+
+        for row in 0..self.model.row_count() {
+            let value = if sync_all {
+                synced_value
+            } else {
+                let Some(entry) = self.model.row_data(row) else {
+                    continue;
+                };
+                brightness_after_scroll(entry.brightness, delta)
+            };
+            self.set_row_brightness(row, value);
+        }
+    }
+
+    /// Short brightness description for the tray tooltip, which Windows
+    /// truncates to 127 characters.
+    pub(crate) fn brightness_summary(&self) -> String {
+        let entries: Vec<MonitorEntry> = self.model.iter().collect();
+        let Some(first) = entries.first() else {
+            return String::new();
+        };
+
+        if entries
+            .iter()
+            .all(|entry| entry.brightness == first.brightness)
+        {
+            return format!("Brightness: {}%", first.brightness);
+        }
+
+        entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}: {}%",
+                    elide(&entry.name, TOOLTIP_NAME_MAX_CHARS),
+                    entry.brightness
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub(crate) fn take_pending(&mut self) -> Vec<BrightnessUpdate> {
@@ -169,6 +221,15 @@ impl MonitorState {
     }
 }
 
+fn elide(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut elided: String = text.chars().take(max_chars - 1).collect();
+    elided.push('…');
+    elided
+}
+
 pub(crate) fn brightness_after_scroll(current: i32, delta: i32) -> i32 {
     if delta > 0 {
         ((current / 5) + 1) * 5
@@ -197,6 +258,65 @@ mod tests {
     fn scroll_clamps_to_the_brightness_range() {
         assert_eq!(brightness_after_scroll(100, 5), 100);
         assert_eq!(brightness_after_scroll(0, -5), 0);
+    }
+
+    fn state_with(brightness: &[(&str, i32)]) -> MonitorState {
+        let mut state = MonitorState::new();
+        state.replace_snapshots(
+            1,
+            brightness
+                .iter()
+                .map(|&(name, brightness)| MonitorSnapshot {
+                    id: MonitorId::new(format!("wmi:{name}")),
+                    name: name.into(),
+                    brightness,
+                })
+                .collect(),
+        );
+        state
+    }
+
+    fn brightness_values(state: &MonitorState) -> Vec<i32> {
+        state.model().iter().map(|entry| entry.brightness).collect()
+    }
+
+    #[test]
+    fn tray_scroll_with_sync_moves_every_monitor_to_the_first_monitors_step() {
+        let mut state = state_with(&[("A", 40), ("B", 73)]);
+        state.scroll_all(120, true);
+        assert_eq!(brightness_values(&state), vec![45, 45]);
+        assert_eq!(state.take_pending().len(), 2);
+    }
+
+    #[test]
+    fn tray_scroll_without_sync_steps_each_monitor_from_its_own_value() {
+        let mut state = state_with(&[("A", 40), ("B", 73)]);
+        state.scroll_all(-120, false);
+        assert_eq!(brightness_values(&state), vec![35, 70]);
+    }
+
+    #[test]
+    fn tray_scroll_without_monitors_does_nothing() {
+        let mut state = MonitorState::new();
+        state.scroll_all(120, true);
+        assert!(!state.has_pending());
+    }
+
+    #[test]
+    fn brightness_summary_collapses_equal_values() {
+        assert_eq!(MonitorState::new().brightness_summary(), "");
+        assert_eq!(
+            state_with(&[("A", 70), ("B", 70)]).brightness_summary(),
+            "Brightness: 70%"
+        );
+    }
+
+    #[test]
+    fn brightness_summary_lists_monitors_with_different_values() {
+        assert_eq!(
+            state_with(&[("A very long monitor name here", 40), ("B", 75)]).brightness_summary(),
+            "A very long monitor nam…: 40%\nB: 75%"
+        );
     }
 
     #[test]

@@ -449,9 +449,10 @@ export component MainWindow inherits Window {
 export component TrayIcon inherits SystemTrayIcon {
     in property <image> app-icon;
     in property <string> app-version;
+    in property <string> brightness-summary;
 
     icon: root.app-icon;
-    tooltip: "MMB \{root.app-version}";
+    tooltip: root.brightness-summary == "" ? "MMB \{root.app-version}" : "MMB \{root.app-version}\n\{root.brightness-summary}";
     title: "MMB";
 
     clicked => {
@@ -460,6 +461,8 @@ export component TrayIcon inherits SystemTrayIcon {
 
     callback toggle-window();
     callback quit-requested();
+    // Invoked from Rust when the mouse wheel turns over the tray icon.
+    callback scrolled(int);
 
     Menu {
         MenuItem {
