@@ -6,7 +6,7 @@ build = "build.rs"
 description = "Multi Monitor Brightness"
 
 [dependencies]
-monbcon = { git = "https://github.com/csjune/monbcon", tag = "v0.1.0" }
+monbcon = "0.1"
 slint = { version = "1.17", default-features = false, features = [
     "std",
     "backend-winit",
