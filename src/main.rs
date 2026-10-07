@@ -1039,7 +1039,7 @@ fn should_suppress_tray_toggle(hidden_click_id: Option<u64>, latest_click_id: u6
 }
 
 fn build_icon(icon_data: &'static [u8]) -> Image {
-    slint::private_unstable_api::re_exports::load_image_from_dynamic_data(icon_data, "ico")
+    Image::load_from_data(icon_data, Some("ico"))
         .expect("embedded application icon should be a valid ICO image")
 }
 
