@@ -9,7 +9,7 @@ use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 
-use super::WorkArea;
+use super::{WorkArea, wide_null};
 
 pub fn work_area_near_cursor() -> Option<WorkArea> {
     let mut point = POINT { x: 0, y: 0 };
@@ -75,8 +75,4 @@ fn scale_factor_for_monitor(monitor: HMONITOR) -> f32 {
     } else {
         1.0
     }
-}
-
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(Some(0)).collect()
 }

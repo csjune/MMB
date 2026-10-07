@@ -1,7 +1,10 @@
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
 use monbcon::{ApplyReport, BrightnessUpdate, MonitorController, RefreshResult};
+
+use crate::notify::{Notify, NotifyOnExit};
 
 enum MonitorCommand {
     Refresh {
@@ -43,10 +46,17 @@ pub(crate) struct MonitorWorker {
 }
 
 impl MonitorWorker {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(notify: Notify) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         thread::spawn(move || {
+            let _notify_on_exit = NotifyOnExit(Arc::clone(&notify));
+            let event_sender = event_sender;
+            let send = |event| {
+                let sent = event_sender.send(event).is_ok();
+                notify();
+                sent
+            };
             let mut controller = MonitorController::new();
 
             while let Ok(command) = command_receiver.recv() {
@@ -55,10 +65,7 @@ impl MonitorWorker {
                     | MonitorCommand::Apply { request_id, .. }
                     | MonitorCommand::ApplyThenRefresh { request_id, .. } => *request_id,
                 };
-                if event_sender
-                    .send(MonitorEvent::Started { request_id })
-                    .is_err()
-                {
+                if !send(MonitorEvent::Started { request_id }) {
                     break;
                 }
 
@@ -85,7 +92,7 @@ impl MonitorWorker {
                     },
                 };
 
-                if event_sender.send(event).is_err() {
+                if !send(event) {
                     break;
                 }
             }

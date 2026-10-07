@@ -1,38 +1,74 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod monitor_requests;
 mod monitor_state;
 mod monitor_worker;
+mod notify;
+mod popup_layout;
 mod theme_worker;
 mod windows_integration;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::error::Error;
 use std::process;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
 use slint::{
-    CloseRequestResponse, ComponentHandle, Image, LogicalSize, ModelRc, PhysicalPosition,
-    SharedString, Timer, TimerMode,
+    CloseRequestResponse, ComponentHandle, Image, ModelRc, SharedString, Timer, TimerMode,
 };
 
 use monbcon::{ApplyReport, BrightnessUpdate, RefreshResult};
+use monitor_requests::{MonitorRequests, Recovery, RefreshDecision};
 use monitor_state::{MonitorState, brightness_after_scroll};
 use monitor_worker::{MonitorEvent, MonitorWorker};
+use notify::Notify;
+use popup_layout::{place_popup, point_is_inside_popup, resize_popup_to_content};
 use theme_worker::{ThemeEvent, ThemeWorker};
 
 slint::include_modules!();
 
-const POPUP_MARGIN: i32 = 12;
-const MONITOR_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
-const POPUP_POSITION_CORRECTION_DELAYS_MS: [u64; 3] = [0, 50, 200];
+const OUTSIDE_CLICK_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const APP_ICON_ICO: &[u8] = include_bytes!("../assets/app.ico");
 const TRAY_ICON_LIGHT_ICO: &[u8] = include_bytes!("../assets/tray-light.ico");
 const TRAY_ICON_DARK_ICO: &[u8] = include_bytes!("../assets/tray-dark.ico");
+
+thread_local! {
+    /// The UI thread's controller, for callbacks that background threads
+    /// post to the event loop.
+    static APP: RefCell<Weak<AppController>> = const { RefCell::new(Weak::new()) };
+}
+
+/// Runs `action` with the controller on the UI thread. Callable from any thread.
+fn run_on_app(action: impl FnOnce(&Rc<AppController>) + Send + 'static) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = APP.with(|app| app.borrow().upgrade()) {
+            action(&app);
+        }
+    });
+}
+
+/// Builds a UI callback that holds only a weak reference to the controller
+/// and does nothing once the controller is gone.
+macro_rules! app_callback {
+    ($app:expr, |$this:ident $(, $arg:ident)*| $body:expr) => {{
+        let app = Rc::downgrade($app);
+        move |$($arg),*| {
+            if let Some($this) = app.upgrade() {
+                $body
+            }
+        }
+    }};
+}
+
+/// A notifier that background threads call to run `action` on the UI thread.
+fn app_notifier(action: fn(&Rc<AppController>)) -> Notify {
+    Arc::new(move || run_on_app(action))
+}
 
 fn main() {
     if let Some(exit_code) = theme_worker::run_theme_helper_if_requested() {
@@ -74,7 +110,6 @@ fn run_app() -> Result<(), Box<dyn Error>> {
 
     let app = AppController::new()?;
     app.show_tray()?;
-    app.start_theme_event_polling();
     app.request_refresh();
     slint::run_event_loop()?;
     Ok(())
@@ -86,15 +121,9 @@ struct AppController {
     monitor_worker: RefCell<MonitorWorker>,
     theme_worker: ThemeWorker,
     apply_timer: Timer,
-    monitor_event_timer: Timer,
-    theme_event_timer: Timer,
+    monitor_timeout_timer: Timer,
     outside_click_timer: Timer,
-    next_request_id: Cell<u64>,
-    latest_refresh_id: Cell<u64>,
-    refresh_requests: Cell<RefreshRequestState>,
-    refresh_after_stall: Cell<bool>,
-    pending_worker_requests: RefCell<PendingWorkerRequests>,
-    monitor_service_stalled: Cell<bool>,
+    requests: RefCell<MonitorRequests>,
     refreshing: Cell<bool>,
     sync_all: Cell<bool>,
     status_message: RefCell<SharedString>,
@@ -125,38 +154,33 @@ impl AppController {
             &tray_dark_icon,
         ));
 
-        let tray_handle = tray.as_weak();
-        let mouse_watcher =
-            windows_integration::GlobalMouseWatcher::new(Box::new(move |x, y, delta| {
+        let mouse_watcher = windows_integration::GlobalMouseWatcher::new(
+            app_notifier(|app| app.poll_outside_click()),
+            Box::new(|x, y, delta| {
                 // Called on the hook thread; the precise hit test talks to the
                 // shell, so it runs on the UI thread instead.
-                let _ = tray_handle.upgrade_in_event_loop(move |tray| {
+                run_on_app(move |app| {
                     if windows_integration::point_is_over_tray_icon(x, y) {
-                        tray.invoke_scrolled(delta);
+                        app.scroll_all_brightness(delta);
                     }
                 });
-            }))
-            .unwrap_or_else(|error| {
-                eprintln!(
-                    "failed to install outside-click watcher: {error}; using polling fallback"
-                );
-                windows_integration::GlobalMouseWatcher::polling()
-            });
+            }),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("failed to install outside-click watcher: {error}; using polling fallback");
+            windows_integration::GlobalMouseWatcher::polling()
+        });
         let app = Rc::new(Self {
             popup: RefCell::new(None),
             monitor_state: RefCell::new(MonitorState::new()),
-            monitor_worker: RefCell::new(MonitorWorker::new()),
-            theme_worker: ThemeWorker::new(),
+            monitor_worker: RefCell::new(MonitorWorker::new(app_notifier(
+                AppController::drain_monitor_events,
+            ))),
+            theme_worker: ThemeWorker::new(app_notifier(|app| app.drain_theme_events())),
             apply_timer: Timer::default(),
-            monitor_event_timer: Timer::default(),
-            theme_event_timer: Timer::default(),
+            monitor_timeout_timer: Timer::default(),
             outside_click_timer: Timer::default(),
-            next_request_id: Cell::new(1),
-            latest_refresh_id: Cell::new(0),
-            refresh_requests: Cell::new(RefreshRequestState::default()),
-            refresh_after_stall: Cell::new(false),
-            pending_worker_requests: RefCell::new(PendingWorkerRequests::default()),
-            monitor_service_stalled: Cell::new(false),
+            requests: RefCell::new(MonitorRequests::new()),
             refreshing: Cell::new(false),
             sync_all: Cell::new(true),
             status_message: RefCell::new(SharedString::default()),
@@ -171,17 +195,15 @@ impl AppController {
             popup_work_area: Cell::new(None),
             popup_position_epoch: Rc::new(Cell::new(0)),
         });
+        // Posted callbacks only run once the event loop starts, so none of
+        // the notifiers above can fire before this is set.
+        APP.with(|slot| *slot.borrow_mut() = Rc::downgrade(&app));
         app.install_handlers();
         Ok(app)
     }
 
     fn install_handlers(self: &Rc<Self>) {
-        let app = Rc::downgrade(self);
-        self.tray.on_toggle_window(move || {
-            let Some(app) = app.upgrade() else {
-                return;
-            };
-
+        self.tray.on_toggle_window(app_callback!(self, |app| {
             app.poll_outside_click();
             if app.consume_matching_outside_hide() {
                 return;
@@ -189,14 +211,7 @@ impl AppController {
             if let Err(error) = app.toggle_popup() {
                 eprintln!("failed to toggle popup: {error}");
             }
-        });
-
-        let app = Rc::downgrade(self);
-        self.tray.on_scrolled(move |delta| {
-            if let Some(app) = app.upgrade() {
-                app.scroll_all_brightness(delta);
-            }
-        });
+        }));
 
         self.tray.on_quit_requested(|| {
             slint::quit_event_loop().ok();
@@ -228,33 +243,17 @@ impl AppController {
             CloseRequestResponse::HideWindow
         });
 
-        let app = Rc::downgrade(self);
-        popup.on_brightness_changed(move |monitor_id, value| {
-            if let Some(app) = app.upgrade() {
-                app.update_brightness(monitor_id, value.round() as i32);
-            }
-        });
-
-        let app = Rc::downgrade(self);
-        popup.on_brightness_scrolled(move |monitor_id, delta| {
-            if let Some(app) = app.upgrade() {
-                app.scroll_brightness(monitor_id, delta);
-            }
-        });
-
-        let app = Rc::downgrade(self);
-        popup.on_refresh_requested(move || {
-            if let Some(app) = app.upgrade() {
-                app.request_refresh();
-            }
-        });
-
-        let app = Rc::downgrade(self);
-        popup.on_theme_toggle_requested(move || {
-            if let Some(app) = app.upgrade() {
-                app.toggle_windows_theme();
-            }
-        });
+        popup.on_brightness_changed(app_callback!(self, |app, monitor_id, value| {
+            app.update_brightness(monitor_id, value.round() as i32)
+        }));
+        popup.on_brightness_scrolled(app_callback!(self, |app, monitor_id, delta| {
+            app.scroll_brightness(monitor_id, delta)
+        }));
+        popup.on_sync_all_changed(app_callback!(self, |app, sync_all| {
+            app.sync_all.set(sync_all)
+        }));
+        popup.on_refresh_requested(app_callback!(self, |app| app.request_refresh()));
+        popup.on_theme_toggle_requested(app_callback!(self, |app| app.toggle_windows_theme()));
 
         Ok(popup)
     }
@@ -280,61 +279,32 @@ impl AppController {
             ),
         }
 
-        let work_area = windows_integration::work_area_near_cursor();
-        self.popup_work_area.set(work_area);
+        self.popup_work_area
+            .set(windows_integration::work_area_near_cursor());
         let popup_height = self.resize_popup_from_state(popup);
         popup.show()?;
-        let position_epoch = self.next_popup_position_epoch();
-        position_popup(popup, popup_height, work_area);
-        stabilize_popup_position(
-            popup,
-            popup_height,
-            work_area,
-            Rc::clone(&self.popup_position_epoch),
-            position_epoch,
-        );
+        self.place_visible_popup(popup, popup_height);
         self.start_outside_click_watcher();
         Ok(())
     }
 
+    fn place_visible_popup(&self, popup: &MainWindow, popup_height: f32) {
+        let position_epoch = self.next_popup_position_epoch();
+        place_popup(
+            popup,
+            popup_height,
+            self.popup_work_area.get(),
+            &self.popup_position_epoch,
+            position_epoch,
+        );
+    }
+
     fn update_brightness(self: &Rc<Self>, monitor_id: SharedString, value: i32) {
-        let sync_all = self.current_sync_all();
-        let has_monitors = {
-            let mut state = self.monitor_state.borrow_mut();
-            state.update_brightness(monitor_id.as_str(), value, sync_all);
-            state.has_monitors()
-        };
-        self.with_popup(|popup| popup.set_has_monitors(has_monitors));
-        self.update_tray_tooltip();
+        let sync_all = self.sync_all.get();
+        self.update_monitor_state(|state| {
+            state.update_brightness(monitor_id.as_str(), value, sync_all)
+        });
         self.schedule_apply();
-    }
-
-    fn scroll_all_brightness(self: &Rc<Self>, delta: i32) {
-        // A refresh replaces every row and drops pending changes, and the
-        // popup hides its sliders meanwhile, so ignore the wheel as well.
-        if self.refreshing.get() {
-            return;
-        }
-        let sync_all = self.current_sync_all();
-        self.monitor_state.borrow_mut().scroll_all(delta, sync_all);
-        self.update_tray_tooltip();
-        self.schedule_apply();
-    }
-
-    fn current_sync_all(&self) -> bool {
-        let sync_all = self
-            .popup
-            .borrow()
-            .as_ref()
-            .map(MainWindow::get_sync_all)
-            .unwrap_or_else(|| self.sync_all.get());
-        self.sync_all.set(sync_all);
-        sync_all
-    }
-
-    fn update_tray_tooltip(&self) {
-        let summary = self.monitor_state.borrow().brightness_summary();
-        self.tray.set_brightness_summary(summary.into());
     }
 
     fn scroll_brightness(self: &Rc<Self>, monitor_id: SharedString, delta: i32) {
@@ -346,20 +316,39 @@ impl AppController {
         self.update_brightness(monitor_id, brightness_after_scroll(current, delta));
     }
 
+    fn scroll_all_brightness(self: &Rc<Self>, delta: i32) {
+        // A refresh replaces every row and drops pending changes, and the
+        // popup hides its sliders meanwhile, so ignore the wheel as well.
+        if self.refreshing.get() {
+            return;
+        }
+        let sync_all = self.sync_all.get();
+        self.update_monitor_state(|state| state.scroll_all(delta, sync_all));
+        self.schedule_apply();
+    }
+
+    /// Changes the monitor state and keeps the tray tooltip in step with it.
+    fn update_monitor_state<R>(&self, update: impl FnOnce(&mut MonitorState) -> R) -> R {
+        let result = update(&mut self.monitor_state.borrow_mut());
+        let summary = self.monitor_state.borrow().brightness_summary();
+        self.tray.set_brightness_summary(summary.into());
+        result
+    }
+
     fn schedule_apply(self: &Rc<Self>) {
-        let app: Weak<Self> = Rc::downgrade(self);
-        self.apply_timer
-            .start(TimerMode::SingleShot, Duration::from_secs(1), move || {
-                if let Some(app) = app.upgrade() {
-                    if app.monitor_service_stalled.get() {
-                        return;
-                    }
-                    let updates = app.monitor_state.borrow_mut().take_pending();
-                    if !updates.is_empty() {
-                        app.request_apply(updates);
-                    }
+        self.apply_timer.start(
+            TimerMode::SingleShot,
+            Duration::from_secs(1),
+            app_callback!(self, |app| {
+                if app.requests.borrow().is_stalled() {
+                    return;
                 }
-            });
+                let updates = app.monitor_state.borrow_mut().take_pending();
+                if !updates.is_empty() {
+                    app.request_apply(updates);
+                }
+            }),
+        );
     }
 
     fn resize_popup_from_state(&self, popup: &MainWindow) -> f32 {
@@ -369,36 +358,21 @@ impl AppController {
     }
 
     fn request_refresh(self: &Rc<Self>) {
-        if self.monitor_service_stalled.get() {
-            self.refresh_after_stall.set(true);
-            self.set_status_message("Monitor service is still busy.");
-            return;
+        let decision = self.requests.borrow_mut().request_refresh();
+        match decision {
+            RefreshDecision::Send { request_id } => self.send_refresh(request_id),
+            RefreshDecision::Coalesced => {}
+            RefreshDecision::Deferred => self.set_status_message("Monitor service is still busy."),
         }
-
-        let mut requests = self.refresh_requests.get();
-        if !requests.request() {
-            self.refresh_requests.set(requests);
-            return;
-        }
-        self.refresh_requests.set(requests);
-
-        self.start_refresh();
     }
 
-    fn start_refresh(self: &Rc<Self>) {
-        if self.monitor_service_stalled.get() {
-            self.refresh_after_stall.set(true);
-            self.refresh_requests.set(RefreshRequestState::default());
-            return;
-        }
-
+    /// Sends a refresh, carrying any brightness changes not applied yet.
+    fn send_refresh(self: &Rc<Self>, request_id: u64) {
         self.apply_timer.stop();
         let updates = self.monitor_state.borrow_mut().take_pending();
         self.set_refreshing(true);
         self.set_status_message("");
 
-        let request_id = self.next_request_id();
-        self.latest_refresh_id.set(request_id);
         let tracked_updates = updates.clone();
         let queued = if updates.is_empty() {
             self.monitor_worker.borrow().refresh(request_id)
@@ -408,14 +382,14 @@ impl AppController {
                 .apply_then_refresh(request_id, updates)
         };
         match queued {
-            Ok(()) => self.track_worker_request(request_id, tracked_updates),
+            Ok(()) => self
+                .requests
+                .borrow_mut()
+                .track(request_id, tracked_updates),
             Err(error) => {
                 eprintln!("failed to queue monitor refresh: {}", error.message);
-                self.monitor_state
-                    .borrow_mut()
-                    .restore_unsent(&error.updates);
-                self.update_tray_tooltip();
-                self.refresh_requests.set(RefreshRequestState::default());
+                self.update_monitor_state(|state| state.restore_unsent(&error.updates));
+                self.requests.borrow_mut().cancel_refresh();
                 self.set_refreshing(false);
                 self.set_status_message("Couldn't refresh monitors.");
             }
@@ -423,51 +397,27 @@ impl AppController {
     }
 
     fn request_apply(self: &Rc<Self>, updates: Vec<BrightnessUpdate>) {
-        let request_id = self.next_request_id();
+        let request_id = self.requests.borrow_mut().begin_apply();
         let tracked_updates = updates.clone();
         match self.monitor_worker.borrow().apply(request_id, updates) {
-            Ok(()) => self.track_worker_request(request_id, tracked_updates),
+            Ok(()) => self
+                .requests
+                .borrow_mut()
+                .track(request_id, tracked_updates),
             Err(error) => {
                 eprintln!("failed to queue brightness update: {}", error.message);
-                self.monitor_state
-                    .borrow_mut()
-                    .restore_unsent(&error.updates);
-                self.update_tray_tooltip();
+                self.update_monitor_state(|state| state.restore_unsent(&error.updates));
                 self.set_status_message("Couldn't change brightness.");
             }
         }
     }
 
-    fn next_request_id(&self) -> u64 {
-        let request_id = self.next_request_id.get();
-        self.next_request_id.set(request_id.wrapping_add(1).max(1));
-        request_id
-    }
-
-    fn track_worker_request(self: &Rc<Self>, request_id: u64, updates: Vec<BrightnessUpdate>) {
-        let mut pending = self.pending_worker_requests.borrow_mut();
-        let should_start_timer = pending.is_empty();
-        pending.track(request_id, updates);
-        drop(pending);
-        if !should_start_timer {
-            return;
-        }
-
-        let app = Rc::downgrade(self);
-        self.monitor_event_timer
-            .start(TimerMode::Repeated, Duration::from_millis(25), move || {
-                if let Some(app) = app.upgrade() {
-                    app.poll_monitor_events();
-                }
-            });
-    }
-
-    fn poll_monitor_events(self: &Rc<Self>) {
+    fn drain_monitor_events(self: &Rc<Self>) {
         loop {
             let event = self.monitor_worker.borrow().try_recv();
             match event {
                 Ok(MonitorEvent::Started { request_id }) => {
-                    self.pending_worker_requests
+                    self.requests
                         .borrow_mut()
                         .mark_started(request_id, Instant::now());
                 }
@@ -492,16 +442,31 @@ impl AppController {
             }
         }
 
-        if self
-            .pending_worker_requests
-            .borrow_mut()
-            .mark_next_timeout(Instant::now(), MONITOR_OPERATION_TIMEOUT)
-            .is_some()
-        {
-            self.monitor_service_stalled.set(true);
+        self.arm_monitor_timeout();
+    }
+
+    /// Wakes up when the oldest running worker request would time out.
+    fn arm_monitor_timeout(self: &Rc<Self>) {
+        let deadline = self.requests.borrow().next_deadline();
+        let Some(deadline) = deadline else {
+            self.monitor_timeout_timer.stop();
+            return;
+        };
+
+        self.monitor_timeout_timer.start(
+            TimerMode::SingleShot,
+            deadline.saturating_duration_since(Instant::now()),
+            app_callback!(self, |app| app.check_monitor_timeout()),
+        );
+    }
+
+    fn check_monitor_timeout(self: &Rc<Self>) {
+        let timed_out = self.requests.borrow_mut().check_timeout(Instant::now());
+        if timed_out {
             self.set_refreshing(false);
             self.set_status_message("Monitor service timed out.");
         }
+        self.arm_monitor_timeout();
     }
 
     fn handle_refresh_result(
@@ -510,7 +475,7 @@ impl AppController {
         apply_report: Option<ApplyReport>,
         result: Result<RefreshResult, String>,
     ) {
-        if request_id != self.latest_refresh_id.get() {
+        if !self.requests.borrow().is_latest_refresh(request_id) {
             return;
         }
 
@@ -523,10 +488,9 @@ impl AppController {
                 for warning in result.warnings {
                     eprintln!("{warning}");
                 }
-                self.monitor_state
-                    .borrow_mut()
-                    .replace_snapshots(result.generation, result.snapshots);
-                self.update_tray_tooltip();
+                self.update_monitor_state(|state| {
+                    state.replace_snapshots(result.generation, result.snapshots)
+                });
                 self.set_status_message(if has_warnings {
                     "Some monitors couldn't be refreshed."
                 } else {
@@ -542,35 +506,19 @@ impl AppController {
         self.with_popup(|popup| {
             let popup_height = self.resize_popup_from_state(popup);
             if popup.window().is_visible() {
-                let work_area = self.popup_work_area.get();
-                let position_epoch = self.next_popup_position_epoch();
-                position_popup(popup, popup_height, work_area);
-                stabilize_popup_position(
-                    popup,
-                    popup_height,
-                    work_area,
-                    Rc::clone(&self.popup_position_epoch),
-                    position_epoch,
-                );
+                self.place_visible_popup(popup, popup_height);
             }
         });
 
-        let mut requests = self.refresh_requests.get();
-        let refresh_again = requests.complete();
-        self.refresh_requests.set(requests);
-        if refresh_again {
-            self.start_refresh();
-        } else {
-            self.set_refreshing(false);
+        let follow_up = self.requests.borrow_mut().complete_refresh();
+        match follow_up {
+            Some(request_id) => self.send_refresh(request_id),
+            None => self.set_refreshing(false),
         }
     }
 
     fn handle_apply_report(&self, report: ApplyReport) {
-        let errors = self
-            .monitor_state
-            .borrow_mut()
-            .reconcile_apply_report(report);
-        self.update_tray_tooltip();
+        let errors = self.update_monitor_state(|state| state.reconcile_apply_report(report));
         if errors.is_empty() {
             self.set_status_message("");
         } else {
@@ -582,32 +530,23 @@ impl AppController {
     }
 
     fn finish_worker_request(self: &Rc<Self>, request_id: u64) {
-        let mut pending = self.pending_worker_requests.borrow_mut();
-        pending.finish(request_id);
-        let is_empty = pending.is_empty();
-        drop(pending);
-        if is_empty {
-            self.monitor_event_timer.stop();
-            let recovered_from_stall = self.monitor_service_stalled.replace(false);
-            if recovered_from_stall {
-                if self.refresh_after_stall.replace(false) {
-                    self.request_refresh();
-                } else if self.monitor_state.borrow().has_pending() {
-                    self.schedule_apply();
-                }
+        let recovery = self.requests.borrow_mut().finish(request_id);
+        match recovery {
+            Some(Recovery::Refresh) => self.request_refresh(),
+            Some(Recovery::ResumeApply) if self.monitor_state.borrow().has_pending() => {
+                self.schedule_apply();
             }
+            Some(Recovery::ResumeApply) | None => {}
         }
     }
 
     fn restart_monitor_worker(self: &Rc<Self>, status_message: &str) {
-        let updates = self.pending_worker_requests.borrow_mut().take_updates();
-        self.monitor_state.borrow_mut().restore_unsent(&updates);
-        self.update_tray_tooltip();
-        self.monitor_worker.replace(MonitorWorker::new());
-        self.monitor_event_timer.stop();
-        self.refresh_requests.set(RefreshRequestState::default());
-        self.refresh_after_stall.set(false);
-        self.monitor_service_stalled.set(false);
+        let updates = self.requests.borrow_mut().reset();
+        self.update_monitor_state(|state| state.restore_unsent(&updates));
+        self.monitor_worker.replace(MonitorWorker::new(app_notifier(
+            AppController::drain_monitor_events,
+        )));
+        self.monitor_timeout_timer.stop();
         self.set_refreshing(false);
         self.set_status_message(status_message);
         self.request_refresh();
@@ -638,7 +577,7 @@ impl AppController {
         }
     }
 
-    fn poll_theme_events(&self) {
+    fn drain_theme_events(&self) {
         loop {
             match self.theme_worker.try_recv() {
                 Ok(ThemeEvent::Changed(Ok(dark_mode))) => {
@@ -662,7 +601,6 @@ impl AppController {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     eprintln!("theme worker disconnected");
-                    self.theme_event_timer.stop();
                     self.finish_theme_change();
                     self.set_status_message("Theme service stopped.");
                     break;
@@ -674,16 +612,6 @@ impl AppController {
     fn finish_theme_change(&self) {
         self.theme_change_in_flight.set(false);
         self.with_popup(|popup| popup.set_theme_changing(false));
-    }
-
-    fn start_theme_event_polling(self: &Rc<Self>) {
-        let app = Rc::downgrade(self);
-        self.theme_event_timer
-            .start(TimerMode::Repeated, Duration::from_millis(100), move || {
-                if let Some(app) = app.upgrade() {
-                    app.poll_theme_events();
-                }
-            });
     }
 
     fn apply_windows_theme(&self, dark_mode: bool) {
@@ -704,54 +632,50 @@ impl AppController {
     }
 
     fn start_outside_click_watcher(self: &Rc<Self>) {
-        self.mouse_watcher.drain();
         self.last_outside_hide_click_id.set(None);
+        self.mouse_watcher.set_watching_clicks(true);
+        if !self.mouse_watcher.needs_polling() {
+            return;
+        }
 
-        let app = Rc::downgrade(self);
-        self.outside_click_timer
-            .start(TimerMode::Repeated, Duration::from_millis(16), move || {
-                if let Some(app) = app.upgrade() {
-                    app.poll_outside_click();
-                }
-            });
+        self.outside_click_timer.start(
+            TimerMode::Repeated,
+            OUTSIDE_CLICK_POLL_INTERVAL,
+            app_callback!(self, |app| app.poll_outside_click()),
+        );
     }
 
     fn stop_outside_click_watcher(&self) {
         self.outside_click_timer.stop();
+        self.mouse_watcher.set_watching_clicks(false);
     }
 
     fn hide_popup(&self, popup: &MainWindow) {
-        self.sync_all.set(popup.get_sync_all());
         popup.hide().ok();
         self.stop_outside_click_watcher();
         self.invalidate_popup_position();
     }
 
     fn discard_hidden_popup(&self) {
-        let sync_all = {
-            let popup_ref = self.popup.borrow();
-            popup_ref
-                .as_ref()
-                .and_then(|popup| (!popup.window().is_visible()).then(|| popup.get_sync_all()))
-        };
-        if let Some(sync_all) = sync_all {
-            self.sync_all.set(sync_all);
+        let hidden = self
+            .popup
+            .borrow()
+            .as_ref()
+            .is_some_and(|popup| !popup.window().is_visible());
+        if hidden {
             self.popup.replace(None);
         }
     }
 
     fn poll_outside_click(&self) {
         let popup_ref = self.popup.borrow();
-        let Some(popup) = popup_ref.as_ref() else {
+        let Some(popup) = popup_ref
+            .as_ref()
+            .filter(|popup| popup.window().is_visible())
+        else {
             self.stop_outside_click_watcher();
-            self.mouse_watcher.drain();
             return;
         };
-        if !popup.window().is_visible() {
-            self.stop_outside_click_watcher();
-            self.mouse_watcher.drain();
-            return;
-        }
 
         while let Ok(event) = self.mouse_watcher.try_recv() {
             match event {
@@ -790,250 +714,6 @@ impl AppController {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct RefreshRequestState {
-    in_flight: bool,
-    again: bool,
-}
-
-struct PendingWorkerRequest {
-    started_at: Option<Instant>,
-    timed_out: bool,
-    updates: Vec<BrightnessUpdate>,
-}
-
-#[derive(Default)]
-struct PendingWorkerRequests {
-    requests: HashMap<u64, PendingWorkerRequest>,
-}
-
-impl PendingWorkerRequests {
-    fn track(&mut self, request_id: u64, updates: Vec<BrightnessUpdate>) {
-        self.requests.insert(
-            request_id,
-            PendingWorkerRequest {
-                started_at: None,
-                timed_out: false,
-                updates,
-            },
-        );
-    }
-
-    fn mark_started(&mut self, request_id: u64, started_at: Instant) {
-        if let Some(request) = self.requests.get_mut(&request_id) {
-            request.started_at = Some(started_at);
-        }
-    }
-
-    fn finish(&mut self, request_id: u64) {
-        self.requests.remove(&request_id);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
-    fn mark_next_timeout(&mut self, now: Instant, timeout: Duration) -> Option<u64> {
-        let timed_out = self.requests.iter_mut().find(|(_, request)| {
-            !request.timed_out
-                && request
-                    .started_at
-                    .is_some_and(|started_at| now.saturating_duration_since(started_at) >= timeout)
-        });
-        timed_out.map(|(&request_id, request)| {
-            request.timed_out = true;
-            request_id
-        })
-    }
-
-    fn take_updates(&mut self) -> Vec<BrightnessUpdate> {
-        std::mem::take(&mut self.requests)
-            .into_values()
-            .flat_map(|request| request.updates)
-            .collect()
-    }
-}
-
-impl RefreshRequestState {
-    fn request(&mut self) -> bool {
-        if self.in_flight {
-            self.again = true;
-            false
-        } else {
-            self.in_flight = true;
-            true
-        }
-    }
-
-    fn complete(&mut self) -> bool {
-        if self.again {
-            self.again = false;
-            true
-        } else {
-            self.in_flight = false;
-            false
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PopupLayoutMetrics {
-    width: f32,
-    min_height: f32,
-    max_height: f32,
-    chrome_height: f32,
-    empty_body_height: f32,
-    monitor_row_height: f32,
-    monitor_row_spacing: f32,
-}
-
-impl PopupLayoutMetrics {
-    fn from_popup(popup: &MainWindow) -> Self {
-        let metrics = popup.global::<PopupMetrics>();
-        Self {
-            width: metrics.get_window_width(),
-            min_height: metrics.get_min_window_height(),
-            max_height: metrics.get_max_window_height(),
-            chrome_height: metrics.get_chrome_height(),
-            empty_body_height: metrics.get_empty_body_height(),
-            monitor_row_height: metrics.get_monitor_row_height(),
-            monitor_row_spacing: metrics.get_monitor_row_spacing(),
-        }
-    }
-}
-
-fn resize_popup_to_content(
-    popup: &MainWindow,
-    monitor_count: usize,
-    work_area: Option<windows_integration::WorkArea>,
-) -> f32 {
-    let metrics = PopupLayoutMetrics::from_popup(popup);
-    let popup_height = clamped_popup_height_for_work_area(
-        popup_height_for_monitor_count(metrics, monitor_count),
-        metrics.min_height,
-        work_area,
-    );
-    popup.set_body_height(popup_height - metrics.chrome_height);
-    popup
-        .window()
-        .set_size(LogicalSize::new(metrics.width, popup_height));
-    popup_height
-}
-
-fn popup_height_for_monitor_count(metrics: PopupLayoutMetrics, monitor_count: usize) -> f32 {
-    let body_height = if monitor_count == 0 {
-        metrics.empty_body_height
-    } else {
-        let row_count = monitor_count as f32;
-        row_count * metrics.monitor_row_height + (row_count - 1.0) * metrics.monitor_row_spacing
-    };
-
-    (metrics.chrome_height + body_height).clamp(metrics.min_height, metrics.max_height)
-}
-
-fn clamped_popup_height_for_work_area(
-    popup_height: f32,
-    min_height: f32,
-    work_area: Option<windows_integration::WorkArea>,
-) -> f32 {
-    let Some(area) = work_area else {
-        return popup_height;
-    };
-
-    let scale_factor = area.scale_factor.max(1.0);
-    let available_height =
-        ((area.bottom - area.top - POPUP_MARGIN * 2) as f32 / scale_factor).max(min_height);
-    popup_height.min(available_height)
-}
-
-fn position_popup(
-    popup: &MainWindow,
-    popup_height: f32,
-    work_area: Option<windows_integration::WorkArea>,
-) {
-    let size = popup.window().size();
-
-    if let Some(area) = work_area {
-        let scale_factor = area
-            .scale_factor
-            .max(popup.window().scale_factor())
-            .max(1.0);
-        let popup_width = PopupLayoutMetrics::from_popup(popup).width;
-        let width = (popup_width * scale_factor).ceil() as i32;
-        let height = (popup_height * scale_factor).ceil() as i32;
-        let width = width.max(size.width as i32).max(1);
-        let height = height.max(size.height as i32).max(1);
-        let target_x = area.right - width - POPUP_MARGIN;
-        let target_y = area.bottom - height - POPUP_MARGIN;
-
-        popup.window().set_position(PhysicalPosition {
-            x: clamp_to_work_area(target_x, area.left, area.right, width),
-            y: clamp_to_work_area(target_y, area.top, area.bottom, height),
-        });
-    }
-}
-
-fn stabilize_popup_position(
-    popup: &MainWindow,
-    popup_height: f32,
-    work_area: Option<windows_integration::WorkArea>,
-    position_epoch: Rc<Cell<u64>>,
-    expected_epoch: u64,
-) {
-    for delay_ms in POPUP_POSITION_CORRECTION_DELAYS_MS {
-        schedule_popup_position_correction(
-            popup,
-            popup_height,
-            work_area,
-            Rc::clone(&position_epoch),
-            expected_epoch,
-            delay_ms,
-        );
-    }
-}
-
-fn schedule_popup_position_correction(
-    popup: &MainWindow,
-    popup_height: f32,
-    work_area: Option<windows_integration::WorkArea>,
-    position_epoch: Rc<Cell<u64>>,
-    expected_epoch: u64,
-    delay_ms: u64,
-) {
-    let popup_weak = popup.as_weak();
-
-    Timer::single_shot(Duration::from_millis(delay_ms), move || {
-        let Some(popup) = popup_weak.upgrade() else {
-            return;
-        };
-
-        if position_epoch.get() == expected_epoch && popup.window().is_visible() {
-            position_popup(&popup, popup_height, work_area);
-        }
-    });
-}
-
-fn clamp_to_work_area(value: i32, start: i32, end: i32, size: i32) -> i32 {
-    let min = start + POPUP_MARGIN;
-    let max = end - size - POPUP_MARGIN;
-
-    if max < min {
-        min
-    } else {
-        value.clamp(min, max)
-    }
-}
-
-fn point_is_inside_popup(popup: &MainWindow, x: i32, y: i32) -> bool {
-    let position = popup.window().position();
-    let size = popup.window().size();
-
-    x >= position.x
-        && x < position.x + size.width as i32
-        && y >= position.y
-        && y < position.y + size.height as i32
-}
-
 fn should_suppress_tray_toggle(hidden_click_id: Option<u64>, latest_click_id: u64) -> bool {
     hidden_click_id.is_some_and(|click_id| click_id == latest_click_id)
 }
@@ -1053,105 +733,7 @@ fn tray_icon_for_dark_mode(dark_mode: bool, light_icon: &Image, dark_icon: &Imag
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
-    use monbcon::{BrightnessUpdate, MonitorId};
-
-    use super::{
-        PendingWorkerRequests, PopupLayoutMetrics, RefreshRequestState, clamp_to_work_area,
-        popup_height_for_monitor_count, should_suppress_tray_toggle,
-    };
-
-    fn popup_metrics() -> PopupLayoutMetrics {
-        PopupLayoutMetrics {
-            width: 348.0,
-            min_height: 148.0,
-            max_height: 560.0,
-            chrome_height: 75.0,
-            empty_body_height: 104.0,
-            monitor_row_height: 70.0,
-            monitor_row_spacing: 12.0,
-        }
-    }
-
-    #[test]
-    fn popup_height_tracks_monitor_rows_and_clamps_to_limits() {
-        let metrics = popup_metrics();
-        assert_eq!(popup_height_for_monitor_count(metrics, 0), 179.0);
-        assert_eq!(popup_height_for_monitor_count(metrics, 1), 148.0);
-        assert_eq!(popup_height_for_monitor_count(metrics, 2), 227.0);
-        assert_eq!(popup_height_for_monitor_count(metrics, 6), 555.0);
-        assert_eq!(popup_height_for_monitor_count(metrics, 7), 560.0);
-    }
-
-    #[test]
-    fn popup_position_stays_inside_the_work_area_margin() {
-        assert_eq!(clamp_to_work_area(900, 0, 1000, 100), 888);
-        assert_eq!(clamp_to_work_area(-50, 0, 1000, 100), 12);
-        assert_eq!(clamp_to_work_area(400, 0, 1000, 100), 400);
-    }
-
-    #[test]
-    fn repeated_refresh_requests_coalesce_into_one_follow_up() {
-        let mut requests = RefreshRequestState::default();
-        assert!(requests.request());
-        assert!(!requests.request());
-        assert!(!requests.request());
-        assert!(requests.complete());
-        assert!(!requests.complete());
-        assert!(requests.request());
-    }
-
-    #[test]
-    fn pending_worker_requests_time_out_only_after_the_worker_starts_them() {
-        let started_at = Instant::now();
-        let update = BrightnessUpdate {
-            generation: 3,
-            id: MonitorId::new("monitor-a"),
-            value: 65,
-        };
-        let mut requests = PendingWorkerRequests::default();
-        requests.track(7, vec![update]);
-
-        assert_eq!(
-            requests.mark_next_timeout(
-                started_at + Duration::from_secs(20),
-                Duration::from_secs(10)
-            ),
-            None
-        );
-        requests.mark_started(7, started_at);
-        assert_eq!(
-            requests
-                .mark_next_timeout(started_at + Duration::from_secs(9), Duration::from_secs(10)),
-            None
-        );
-        assert_eq!(
-            requests.mark_next_timeout(
-                started_at + Duration::from_secs(10),
-                Duration::from_secs(10)
-            ),
-            Some(7)
-        );
-        assert_eq!(
-            requests.mark_next_timeout(
-                started_at + Duration::from_secs(11),
-                Duration::from_secs(10)
-            ),
-            None
-        );
-        let updates = requests.take_updates();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].id.as_str(), "monitor-a");
-        assert!(requests.is_empty());
-    }
-
-    #[test]
-    fn finishing_an_unknown_late_request_keeps_the_tracker_consistent() {
-        let mut requests = PendingWorkerRequests::default();
-        requests.finish(99);
-        assert!(requests.is_empty());
-    }
+    use super::should_suppress_tray_toggle;
 
     #[test]
     fn tray_toggle_is_only_suppressed_for_the_click_that_hid_the_popup() {

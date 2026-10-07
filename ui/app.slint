@@ -294,6 +294,7 @@ export component MainWindow inherits Window {
     callback brightness-scrolled(string, int);
     callback refresh-requested();
     callback theme-toggle-requested();
+    callback sync-all-changed(bool);
 
     title: "MMB";
     icon: root.app-icon;
@@ -416,6 +417,11 @@ export component MainWindow inherits Window {
                         icon-y: 1px;
                         checkable: true;
                         checked <=> root.sync-all;
+
+                        // The button flips `checked` before it calls `clicked`.
+                        clicked => {
+                            root.sync-all-changed(root.sync-all);
+                        }
                     }
 
                     IconButton {
@@ -461,8 +467,6 @@ export component TrayIcon inherits SystemTrayIcon {
 
     callback toggle-window();
     callback quit-requested();
-    // Invoked from Rust when the mouse wheel turns over the tray icon.
-    callback scrolled(int);
 
     Menu {
         MenuItem {

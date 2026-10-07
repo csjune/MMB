@@ -1,9 +1,10 @@
 use std::io;
-use std::iter;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows_sys::Win32::System::Threading::CreateMutexW;
+
+use super::wide_null;
 
 const INSTANCE_MUTEX_NAME: &str = "Local\\MMB.SingleInstance";
 
@@ -24,7 +25,7 @@ pub fn acquire_single_instance() -> io::Result<Option<SingleInstanceGuard>> {
 }
 
 fn acquire_named_instance(name: &str) -> io::Result<Option<SingleInstanceGuard>> {
-    let wide_name: Vec<u16> = name.encode_utf16().chain(iter::once(0)).collect();
+    let wide_name = wide_null(name);
     let handle = unsafe { CreateMutexW(ptr::null(), 0, wide_name.as_ptr()) };
     let error = unsafe { GetLastError() };
 

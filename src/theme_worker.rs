@@ -1,9 +1,11 @@
 use std::env;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::notify::{Notify, NotifyOnExit};
 use crate::windows_integration;
 
 const THEME_HELPER_ARGUMENT: &str = "--mmb-theme-helper";
@@ -25,11 +27,14 @@ pub(crate) struct ThemeWorker {
 }
 
 impl ThemeWorker {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(notify: Notify) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         let watcher_event_sender = event_sender.clone();
+        let toggle_notify = Arc::clone(&notify);
         thread::spawn(move || {
+            let _notify_on_exit = NotifyOnExit(Arc::clone(&toggle_notify));
+            let event_sender = event_sender;
             while let Ok(ThemeCommand::Toggle) = command_receiver.recv() {
                 let result = windows_integration::next_windows_dark_mode()
                     .map_err(|error| error.to_string())
@@ -38,12 +43,14 @@ impl ThemeWorker {
                         windows_integration::windows_main_dark_mode()
                             .map_err(|error| error.to_string())
                     });
-                if event_sender.send(ThemeEvent::Toggled(result)).is_err() {
+                let sent = event_sender.send(ThemeEvent::Toggled(result)).is_ok();
+                toggle_notify();
+                if !sent {
                     break;
                 }
             }
         });
-        spawn_theme_watcher(watcher_event_sender);
+        spawn_theme_watcher(watcher_event_sender, notify);
 
         Self {
             commands: command_sender,
@@ -62,9 +69,11 @@ impl ThemeWorker {
     }
 }
 
-fn spawn_theme_watcher(event_sender: Sender<ThemeEvent>) {
+fn spawn_theme_watcher(event_sender: Sender<ThemeEvent>, notify: Notify) {
     #[cfg(windows)]
     thread::spawn(move || {
+        let _notify_on_exit = NotifyOnExit(Arc::clone(&notify));
+        let event_sender = event_sender;
         let watcher = match windows_integration::WindowsThemeWatcher::new() {
             Ok(watcher) => watcher,
             Err(error) => {
@@ -78,20 +87,20 @@ fn spawn_theme_watcher(event_sender: Sender<ThemeEvent>) {
                 .wait_for_change()
                 .and_then(|()| windows_integration::windows_main_dark_mode());
             let stop = result.is_err();
-            if event_sender
+            let sent = event_sender
                 .send(ThemeEvent::Changed(
                     result.map_err(|error| error.to_string()),
                 ))
-                .is_err()
-                || stop
-            {
+                .is_ok();
+            notify();
+            if !sent || stop {
                 break;
             }
         }
     });
 
     #[cfg(not(windows))]
-    drop(event_sender);
+    drop((event_sender, notify));
 }
 
 pub(crate) fn run_theme_helper_if_requested() -> Option<i32> {

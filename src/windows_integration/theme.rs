@@ -19,6 +19,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::BOOL;
 
+use super::wide_null;
+
 const THEME_REGISTRY_SUBKEY: &str =
     "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const THEME_SETTINGS: [&str; 5] = [
@@ -443,10 +445,6 @@ fn update_per_user_system_parameters() {
     unsafe {
         update(1, 1);
     }
-}
-
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(Some(0)).collect()
 }
 
 #[cfg(test)]

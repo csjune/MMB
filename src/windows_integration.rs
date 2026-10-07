@@ -23,6 +23,12 @@ mod theme;
 #[path = "windows_integration/tray.rs"]
 mod tray;
 
+/// Encodes `value` as a NUL-terminated UTF-16 string for Win32 calls.
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
+}
+
 #[cfg(windows)]
 pub use desktop::{show_error_message, work_area_near_cursor};
 #[cfg(windows)]
@@ -60,6 +66,7 @@ mod fallback {
 
     impl GlobalMouseWatcher {
         pub fn new(
+            _on_watched_click: crate::notify::Notify,
             _on_notification_area_wheel: NotificationAreaWheelHandler,
         ) -> Result<Self, WindowsIntegrationError> {
             Err(WindowsIntegrationError)
@@ -69,11 +76,15 @@ mod fallback {
             Self
         }
 
+        pub fn needs_polling(&self) -> bool {
+            false
+        }
+
+        pub fn set_watching_clicks(&self, _watching: bool) {}
+
         pub fn try_recv(&self) -> Result<GlobalMouseEvent, TryRecvError> {
             Err(TryRecvError::Empty)
         }
-
-        pub fn drain(&self) {}
 
         pub fn latest_click_id(&self) -> u64 {
             0

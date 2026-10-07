@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::fmt;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::tray::point_is_in_notification_area;
+use crate::notify::Notify;
 
 const MOUSE_BUTTONS: [i32; 3] = [VK_LBUTTON as i32, VK_RBUTTON as i32, VK_MBUTTON as i32];
 
@@ -32,6 +33,8 @@ struct HookState {
     events: SyncSender<GlobalMouseEvent>,
     next_click_id: AtomicU64,
     latest_click_id: Arc<AtomicU64>,
+    watching_clicks: Arc<AtomicBool>,
+    on_watched_click: Notify,
     on_notification_area_wheel: NotificationAreaWheelHandler,
 }
 
@@ -48,6 +51,7 @@ enum MouseSource {
     Hook {
         events: Receiver<GlobalMouseEvent>,
         latest_click_id: Arc<AtomicU64>,
+        watching_clicks: Arc<AtomicBool>,
     },
     Polling(PollingMouseWatcher),
 }
@@ -70,13 +74,19 @@ struct PollingMouseWatcher {
 }
 
 impl GlobalMouseWatcher {
+    /// Installs a low-level mouse hook. While click watching is on, button
+    /// presses are queued for [`Self::try_recv`] and `on_watched_click` is
+    /// called after each one.
     pub fn new(
+        on_watched_click: Notify,
         on_notification_area_wheel: NotificationAreaWheelHandler,
     ) -> Result<Self, MouseWatcherError> {
         let (event_sender, event_receiver) = mpsc::sync_channel(64);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let latest_click_id = Arc::new(AtomicU64::new(0));
         let hook_latest_click_id = Arc::clone(&latest_click_id);
+        let watching_clicks = Arc::new(AtomicBool::new(false));
+        let hook_watching_clicks = Arc::clone(&watching_clicks);
         thread::Builder::new()
             .name("mmb-mouse-hook".into())
             .spawn(move || {
@@ -95,6 +105,8 @@ impl GlobalMouseWatcher {
                         events: event_sender,
                         next_click_id: AtomicU64::new(0),
                         latest_click_id: hook_latest_click_id,
+                        watching_clicks: hook_watching_clicks,
+                        on_watched_click,
                         on_notification_area_wheel,
                     })
                     .is_err()
@@ -125,6 +137,7 @@ impl GlobalMouseWatcher {
                 source: MouseSource::Hook {
                     events: event_receiver,
                     latest_click_id,
+                    watching_clicks,
                 },
             }),
             Ok(Err(error)) => Err(MouseWatcherError(error)),
@@ -140,6 +153,23 @@ impl GlobalMouseWatcher {
         }
     }
 
+    /// The polling fallback can't notify, so its owner must sample it on a
+    /// timer while watching clicks.
+    pub fn needs_polling(&self) -> bool {
+        matches!(self.source, MouseSource::Polling(_))
+    }
+
+    /// Starts or stops queueing clicks, discarding any queued earlier.
+    pub fn set_watching_clicks(&self, watching: bool) {
+        if let MouseSource::Hook {
+            watching_clicks, ..
+        } = &self.source
+        {
+            watching_clicks.store(watching, Ordering::Relaxed);
+        }
+        self.drain();
+    }
+
     pub fn try_recv(&self) -> Result<GlobalMouseEvent, TryRecvError> {
         match &self.source {
             MouseSource::Hook { events, .. } => events.try_recv(),
@@ -147,7 +177,7 @@ impl GlobalMouseWatcher {
         }
     }
 
-    pub fn drain(&self) {
+    fn drain(&self) {
         match &self.source {
             MouseSource::Hook { events, .. } => while events.try_recv().is_ok() {},
             MouseSource::Polling(watcher) => while watcher.try_event().is_ok() {},
@@ -238,12 +268,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 .wrapping_add(1)
                 .max(1);
             state.latest_click_id.store(click_id, Ordering::Relaxed);
-            let event = GlobalMouseEvent::ButtonDown {
-                click_id,
-                x: data.pt.x,
-                y: data.pt.y,
-            };
-            let _ = state.events.try_send(event);
+            if state.watching_clicks.load(Ordering::Relaxed) {
+                let event = GlobalMouseEvent::ButtonDown {
+                    click_id,
+                    x: data.pt.x,
+                    y: data.pt.y,
+                };
+                if state.events.try_send(event).is_ok() {
+                    (state.on_watched_click)();
+                }
+            }
         }
     }
 

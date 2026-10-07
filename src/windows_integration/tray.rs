@@ -9,6 +9,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WindowFromPoint,
 };
 
+use super::wide_null;
+
 // Slint's Windows tray backend registers its icon on a message-only window of
 // this class, always with the same icon id.
 const SLINT_TRAY_WINDOW_CLASS: &str = "SlintSystemTrayWindow";
@@ -61,10 +63,7 @@ pub fn point_is_over_tray_icon(x: i32, y: i32) -> bool {
 }
 
 fn own_tray_window() -> Option<HWND> {
-    let class_name: Vec<u16> = SLINT_TRAY_WINDOW_CLASS
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    let class_name = wide_null(SLINT_TRAY_WINDOW_CLASS);
     let process_id = unsafe { GetCurrentProcessId() };
     let mut window = ptr::null_mut();
 
