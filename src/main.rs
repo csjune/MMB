@@ -324,7 +324,7 @@ impl AppController {
         }
         let sync_all = self.sync_all.get();
         self.update_monitor_state(|state| state.scroll_all(delta, sync_all));
-        self.schedule_apply();
+        self.apply_immediately();
     }
 
     /// Changes the monitor state and keeps the tray tooltip in step with it.
@@ -335,20 +335,34 @@ impl AppController {
         result
     }
 
+    /// Applies pending brightness changes once the sliders have been still
+    /// for a second.
     fn schedule_apply(self: &Rc<Self>) {
         self.apply_timer.start(
             TimerMode::SingleShot,
             Duration::from_secs(1),
             app_callback!(self, |app| {
-                if app.requests.borrow().is_stalled() {
-                    return;
-                }
-                let updates = app.monitor_state.borrow_mut().take_pending();
-                if !updates.is_empty() {
-                    app.request_apply(updates);
+                if !app.requests.borrow().is_stalled() {
+                    app.send_pending_apply();
                 }
             }),
         );
+    }
+
+    /// Applies pending brightness changes now, or as soon as the worker
+    /// finishes what it is doing, skipping the slider delay.
+    fn apply_immediately(self: &Rc<Self>) {
+        self.apply_timer.stop();
+        if self.requests.borrow_mut().apply_now_or_when_idle() {
+            self.send_pending_apply();
+        }
+    }
+
+    fn send_pending_apply(self: &Rc<Self>) {
+        let updates = self.monitor_state.borrow_mut().take_pending();
+        if !updates.is_empty() {
+            self.request_apply(updates);
+        }
     }
 
     fn resize_popup_from_state(&self, popup: &MainWindow) -> f32 {
@@ -537,6 +551,9 @@ impl AppController {
                 self.schedule_apply();
             }
             Some(Recovery::ResumeApply) | None => {}
+        }
+        if self.requests.borrow_mut().take_apply_when_idle() {
+            self.apply_immediately();
         }
     }
 

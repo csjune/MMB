@@ -35,6 +35,7 @@ pub(crate) struct MonitorRequests {
     pending: PendingWorkerRequests,
     stalled: bool,
     refresh_after_stall: bool,
+    apply_when_idle: bool,
 }
 
 impl MonitorRequests {
@@ -46,6 +47,7 @@ impl MonitorRequests {
             pending: PendingWorkerRequests::default(),
             stalled: false,
             refresh_after_stall: false,
+            apply_when_idle: false,
         }
     }
 
@@ -88,6 +90,24 @@ impl MonitorRequests {
 
     pub(crate) fn begin_apply(&mut self) -> u64 {
         self.next_request_id()
+    }
+
+    /// Returns true when brightness changes can go to the worker right away.
+    /// Otherwise remembers to send them once the worker is idle, so a burst
+    /// of changes collapses into one apply of the latest values instead of
+    /// queueing up behind slow monitor writes.
+    pub(crate) fn apply_now_or_when_idle(&mut self) -> bool {
+        if self.is_idle() {
+            return true;
+        }
+        self.apply_when_idle = true;
+        false
+    }
+
+    /// Call after [`Self::finish`]. Returns true when an apply deferred by
+    /// [`Self::apply_now_or_when_idle`] should be sent now.
+    pub(crate) fn take_apply_when_idle(&mut self) -> bool {
+        self.is_idle() && std::mem::take(&mut self.apply_when_idle)
     }
 
     /// Records a request that was sent to the worker.
@@ -137,7 +157,12 @@ impl MonitorRequests {
         self.refresh = RefreshRequestState::default();
         self.stalled = false;
         self.refresh_after_stall = false;
+        self.apply_when_idle = false;
         self.pending.take_updates()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.pending.is_empty() && !self.stalled
     }
 
     fn begin_refresh(&mut self) -> u64 {
@@ -425,6 +450,48 @@ mod tests {
             requests.request_refresh(),
             RefreshDecision::Send { .. }
         ));
+    }
+
+    #[test]
+    fn an_immediate_apply_goes_out_right_away_when_the_worker_is_idle() {
+        let mut requests = MonitorRequests::new();
+        assert!(requests.apply_now_or_when_idle());
+        assert!(!requests.take_apply_when_idle());
+    }
+
+    #[test]
+    fn immediate_applies_wait_for_the_busy_worker_and_collapse_into_one() {
+        let mut requests = MonitorRequests::new();
+        let first = sent_apply(&mut requests, vec![update("a")]);
+        let refresh = sent_refresh(&mut requests);
+        assert!(!requests.apply_now_or_when_idle());
+        assert!(!requests.apply_now_or_when_idle());
+
+        requests.finish(first);
+        assert!(!requests.take_apply_when_idle());
+        requests.finish(refresh);
+        assert!(requests.take_apply_when_idle());
+        assert!(!requests.take_apply_when_idle());
+    }
+
+    #[test]
+    fn an_immediate_apply_waits_while_the_worker_is_stalled() {
+        let mut requests = MonitorRequests::new();
+        let apply = sent_apply(&mut requests, vec![update("a")]);
+        stall_on(&mut requests, apply);
+        assert!(!requests.apply_now_or_when_idle());
+
+        assert_eq!(requests.finish(apply), Some(Recovery::ResumeApply));
+        assert!(requests.take_apply_when_idle());
+    }
+
+    #[test]
+    fn reset_forgets_a_deferred_immediate_apply() {
+        let mut requests = MonitorRequests::new();
+        sent_apply(&mut requests, vec![update("a")]);
+        assert!(!requests.apply_now_or_when_idle());
+        requests.reset();
+        assert!(!requests.take_apply_when_idle());
     }
 
     #[test]
