@@ -14,9 +14,12 @@ slint = { version = "1.18", default-features = false, features = [
     "renderer-software",
     "unstable-winit-030",
     "system-tray",
-    "image-default-formats",
     "compat-1-2",
 ] }
+# Not used directly: Slint decodes images with this crate, and enabling only
+# the ICO decoder here lets it load the embedded icons without pulling in
+# every format that Slint's `image-default-formats` would add.
+image = { version = "0.25", default-features = false, features = ["ico"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -36,4 +39,5 @@ winresource = "0.1.31"
 
 [profile.release]
 lto = true
+codegen-units = 1
 strip = true
