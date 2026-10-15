@@ -7,7 +7,7 @@ description = "Multi Monitor Brightness"
 license = "MIT"
 
 [dependencies]
-monbcon = "0.1"
+monbcon = "0.2"
 slint = { version = "1.18", default-features = false, features = [
     "std",
     "backend-winit",

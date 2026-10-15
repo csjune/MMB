@@ -244,7 +244,22 @@ mod tests {
     use slint::Model;
 
     use super::{MonitorState, brightness_after_scroll};
-    use monbcon::{ApplyOutcome, ApplyReport, MonitorId, MonitorSnapshot};
+    use monbcon::{ApplyError, ApplyOutcome, ApplyReport, MonitorId, MonitorSnapshot};
+
+    fn failed_report(
+        generation: u64,
+        id: MonitorId,
+        requested: i32,
+        effective: i32,
+    ) -> ApplyReport {
+        ApplyReport::new(vec![ApplyOutcome::new(
+            generation,
+            id,
+            requested,
+            Some(effective),
+            Some(ApplyError::Backend("test failure".into())),
+        )])
+    }
 
     #[test]
     fn scroll_snaps_to_the_next_five_percent_step() {
@@ -266,10 +281,8 @@ mod tests {
             1,
             brightness
                 .iter()
-                .map(|&(name, brightness)| MonitorSnapshot {
-                    id: MonitorId::new(format!("wmi:{name}")),
-                    name: name.into(),
-                    brightness,
+                .map(|&(name, brightness)| {
+                    MonitorSnapshot::new(MonitorId::new(format!("wmi:{name}")), name, brightness)
                 })
                 .collect(),
         );
@@ -323,26 +336,11 @@ mod tests {
     fn failed_apply_restores_the_previous_value() {
         let id = MonitorId::new("wmi:test");
         let mut state = MonitorState::new();
-        state.replace_snapshots(
-            1,
-            vec![MonitorSnapshot {
-                id: id.clone(),
-                name: "Test".into(),
-                brightness: 40,
-            }],
-        );
+        state.replace_snapshots(1, vec![MonitorSnapshot::new(id.clone(), "Test", 40)]);
         state.update_brightness(id.as_str(), 75, false);
         state.take_pending();
 
-        let errors = state.reconcile_apply_report(ApplyReport {
-            outcomes: vec![ApplyOutcome {
-                generation: 1,
-                id,
-                requested: 75,
-                effective: Some(40),
-                error: Some("test failure".into()),
-            }],
-        });
+        let errors = state.reconcile_apply_report(failed_report(1, id, 75, 40));
 
         assert_eq!(errors.len(), 1);
         assert_eq!(state.model().row_data(0).unwrap().brightness, 40);
@@ -352,27 +350,12 @@ mod tests {
     fn failed_old_apply_does_not_overwrite_a_newer_change() {
         let id = MonitorId::new("wmi:test");
         let mut state = MonitorState::new();
-        state.replace_snapshots(
-            1,
-            vec![MonitorSnapshot {
-                id: id.clone(),
-                name: "Test".into(),
-                brightness: 40,
-            }],
-        );
+        state.replace_snapshots(1, vec![MonitorSnapshot::new(id.clone(), "Test", 40)]);
         state.update_brightness(id.as_str(), 75, false);
         state.take_pending();
         state.update_brightness(id.as_str(), 80, false);
 
-        state.reconcile_apply_report(ApplyReport {
-            outcomes: vec![ApplyOutcome {
-                generation: 1,
-                id,
-                requested: 75,
-                effective: Some(40),
-                error: Some("test failure".into()),
-            }],
-        });
+        state.reconcile_apply_report(failed_report(1, id, 75, 40));
 
         assert_eq!(state.model().row_data(0).unwrap().brightness, 80);
     }
@@ -381,14 +364,7 @@ mod tests {
     fn unsent_apply_restores_the_last_confirmed_value() {
         let id = MonitorId::new("wmi:test");
         let mut state = MonitorState::new();
-        state.replace_snapshots(
-            1,
-            vec![MonitorSnapshot {
-                id: id.clone(),
-                name: "Test".into(),
-                brightness: 40,
-            }],
-        );
+        state.replace_snapshots(1, vec![MonitorSnapshot::new(id.clone(), "Test", 40)]);
         state.update_brightness(id.as_str(), 75, false);
         let updates = state.take_pending();
 
@@ -401,24 +377,9 @@ mod tests {
     fn stale_apply_report_does_not_modify_a_new_generation() {
         let id = MonitorId::new("wmi:test");
         let mut state = MonitorState::new();
-        state.replace_snapshots(
-            2,
-            vec![MonitorSnapshot {
-                id: id.clone(),
-                name: "Test".into(),
-                brightness: 60,
-            }],
-        );
+        state.replace_snapshots(2, vec![MonitorSnapshot::new(id.clone(), "Test", 60)]);
 
-        state.reconcile_apply_report(ApplyReport {
-            outcomes: vec![ApplyOutcome {
-                generation: 1,
-                id,
-                requested: 60,
-                effective: Some(20),
-                error: Some("stale failure".into()),
-            }],
-        });
+        state.reconcile_apply_report(failed_report(1, id, 60, 20));
 
         assert_eq!(state.model().row_data(0).unwrap().brightness, 60);
     }

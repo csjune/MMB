@@ -2624,9 +2624,9 @@ dependencies = [
 
 [[package]]
 name = "monbcon"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840f9c0b5104b030ebc7b01e32983acbb902f4ccf32e10e8cfe656b165642c74"
+checksum = "fcc3a43244adbf6dc9b7c4d90ba5303cdd796dad303425466f027a60178dd0b3"
 dependencies = [
  "libc",
  "serde",
