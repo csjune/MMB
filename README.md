@@ -11,6 +11,7 @@ Multi Monitor Brightness is a Windows tray app for adjusting monitor brightness 
   - Shows a single line when all monitors match, or one line per monitor otherwise.
 - **Sync monitors button:** Keeps all monitors at the same brightness. On by default.
 - **Windows theme button:** Switches Windows between light and dark mode. The app also follows the system theme automatically.
+- **Lightweight:** Uses very little memory while it waits in the tray.
 
 ## Requirements
 
