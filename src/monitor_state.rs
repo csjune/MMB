@@ -64,11 +64,11 @@ impl MonitorState {
     /// Scrolls every monitor at once, as the tray icon has no single slider.
     /// With sync enabled all monitors follow the first one; otherwise each
     /// monitor steps from its own value.
-    pub(crate) fn scroll_all(&mut self, delta: i32, sync_all: bool) {
+    pub(crate) fn scroll_all(&mut self, steps: i32, sync_all: bool) {
         let Some(first) = self.model.row_data(0) else {
             return;
         };
-        let synced_value = brightness_after_scroll(first.brightness, delta);
+        let synced_value = brightness_after_scroll(first.brightness, steps);
 
         for row in 0..self.model.row_count() {
             let value = if sync_all {
@@ -77,7 +77,7 @@ impl MonitorState {
                 let Some(entry) = self.model.row_data(row) else {
                     continue;
                 };
-                brightness_after_scroll(entry.brightness, delta)
+                brightness_after_scroll(entry.brightness, steps)
             };
             self.set_row_brightness(row, value);
         }
@@ -230,20 +230,49 @@ fn elide(text: &str, max_chars: usize) -> String {
     elided
 }
 
-pub(crate) fn brightness_after_scroll(current: i32, delta: i32) -> i32 {
-    if delta > 0 {
-        ((current / 5) + 1) * 5
-    } else {
-        (((current + 4) / 5) - 1) * 5
+/// Moves `current` by `steps` five-percent steps, snapping to the 5% grid
+/// first. Positive steps brighten.
+pub(crate) fn brightness_after_scroll(current: i32, steps: i32) -> i32 {
+    (0..steps.unsigned_abs()).fold(current, |value, _| {
+        if steps > 0 {
+            ((value / 5) + 1) * 5
+        } else {
+            (((value + 4) / 5) - 1) * 5
+        }
+        .clamp(0, 100)
+    })
+}
+
+/// One notch of a standard mouse wheel, in `WM_MOUSEWHEEL` units.
+const WHEEL_DELTA: i32 = 120;
+
+/// Turns raw wheel deltas into whole brightness steps. Precision touchpads
+/// and free-spinning wheels send many small deltas, which would otherwise
+/// each move a full step.
+#[derive(Default)]
+pub(crate) struct WheelAccumulator {
+    remainder: i32,
+}
+
+impl WheelAccumulator {
+    pub(crate) fn steps(&mut self, delta: i32) -> i32 {
+        // Turning the wheel back starts over instead of first cancelling out
+        // the partial notch.
+        if delta.signum() != self.remainder.signum() {
+            self.remainder = 0;
+        }
+        self.remainder += delta;
+        let steps = self.remainder / WHEEL_DELTA;
+        self.remainder %= WHEEL_DELTA;
+        steps
     }
-    .clamp(0, 100)
 }
 
 #[cfg(test)]
 mod tests {
     use slint::Model;
 
-    use super::{MonitorState, brightness_after_scroll};
+    use super::{MonitorState, WheelAccumulator, brightness_after_scroll};
     use monbcon::{ApplyError, ApplyOutcome, ApplyReport, MonitorId, MonitorSnapshot};
 
     fn failed_report(
@@ -263,16 +292,48 @@ mod tests {
 
     #[test]
     fn scroll_snaps_to_the_next_five_percent_step() {
-        assert_eq!(brightness_after_scroll(73, 5), 75);
-        assert_eq!(brightness_after_scroll(73, -5), 70);
-        assert_eq!(brightness_after_scroll(75, 5), 80);
-        assert_eq!(brightness_after_scroll(75, -5), 70);
+        assert_eq!(brightness_after_scroll(73, 1), 75);
+        assert_eq!(brightness_after_scroll(73, -1), 70);
+        assert_eq!(brightness_after_scroll(75, 1), 80);
+        assert_eq!(brightness_after_scroll(75, -1), 70);
+    }
+
+    #[test]
+    fn scroll_moves_one_step_per_notch() {
+        assert_eq!(brightness_after_scroll(73, 3), 85);
+        assert_eq!(brightness_after_scroll(73, -2), 65);
+        assert_eq!(brightness_after_scroll(73, 0), 73);
     }
 
     #[test]
     fn scroll_clamps_to_the_brightness_range() {
-        assert_eq!(brightness_after_scroll(100, 5), 100);
-        assert_eq!(brightness_after_scroll(0, -5), 0);
+        assert_eq!(brightness_after_scroll(100, 1), 100);
+        assert_eq!(brightness_after_scroll(0, -1), 0);
+        assert_eq!(brightness_after_scroll(90, 5), 100);
+    }
+
+    #[test]
+    fn small_wheel_deltas_add_up_to_whole_notches() {
+        let mut wheel = WheelAccumulator::default();
+        assert_eq!(wheel.steps(40), 0);
+        assert_eq!(wheel.steps(40), 0);
+        assert_eq!(wheel.steps(40), 1);
+        assert_eq!(wheel.steps(-120), -1);
+    }
+
+    #[test]
+    fn a_big_wheel_delta_moves_several_steps_and_keeps_the_rest() {
+        let mut wheel = WheelAccumulator::default();
+        assert_eq!(wheel.steps(300), 2);
+        assert_eq!(wheel.steps(60), 1);
+    }
+
+    #[test]
+    fn turning_the_wheel_back_drops_the_partial_notch() {
+        let mut wheel = WheelAccumulator::default();
+        assert_eq!(wheel.steps(100), 0);
+        assert_eq!(wheel.steps(-30), 0);
+        assert_eq!(wheel.steps(-90), -1);
     }
 
     fn state_with(brightness: &[(&str, i32)]) -> MonitorState {
@@ -296,7 +357,7 @@ mod tests {
     #[test]
     fn tray_scroll_with_sync_moves_every_monitor_to_the_first_monitors_step() {
         let mut state = state_with(&[("A", 40), ("B", 73)]);
-        state.scroll_all(120, true);
+        state.scroll_all(1, true);
         assert_eq!(brightness_values(&state), vec![45, 45]);
         assert_eq!(state.take_pending().len(), 2);
     }
@@ -304,14 +365,14 @@ mod tests {
     #[test]
     fn tray_scroll_without_sync_steps_each_monitor_from_its_own_value() {
         let mut state = state_with(&[("A", 40), ("B", 73)]);
-        state.scroll_all(-120, false);
+        state.scroll_all(-1, false);
         assert_eq!(brightness_values(&state), vec![35, 70]);
     }
 
     #[test]
     fn tray_scroll_without_monitors_does_nothing() {
         let mut state = MonitorState::new();
-        state.scroll_all(120, true);
+        state.scroll_all(1, true);
         assert!(!state.has_pending());
     }
 

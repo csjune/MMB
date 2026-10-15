@@ -10,6 +10,11 @@ use monbcon::BrightnessUpdate;
 /// How long a started request may run before the worker counts as stalled.
 const MONITOR_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a started request may run before the worker is given up on and
+/// replaced. A hardware call that never returns would otherwise block every
+/// later request until the app restarts.
+const MONITOR_ABANDON_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(crate) enum RefreshDecision {
     /// Send a refresh with this id to the worker.
     Send { request_id: u64 },
@@ -28,6 +33,26 @@ pub(crate) enum Recovery {
     ResumeApply,
 }
 
+/// What [`MonitorRequests::check_timeout`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Timeout {
+    None,
+    /// A request just ran past [`MONITOR_OPERATION_TIMEOUT`]; the worker is
+    /// stalled until its outstanding requests finish.
+    Stalled,
+    /// A request ran past [`MONITOR_ABANDON_TIMEOUT`]; replace the worker
+    /// and call [`MonitorRequests::abandon`].
+    Abandon,
+}
+
+/// The outcome of [`MonitorRequests::abandon`].
+pub(crate) struct Abandoned {
+    /// Brightness updates the abandoned worker never confirmed.
+    pub(crate) updates: Vec<BrightnessUpdate>,
+    /// Whether the new worker should refresh right away.
+    pub(crate) refresh: bool,
+}
+
 pub(crate) struct MonitorRequests {
     next_request_id: u64,
     latest_refresh_id: u64,
@@ -36,6 +61,7 @@ pub(crate) struct MonitorRequests {
     stalled: bool,
     refresh_after_stall: bool,
     apply_when_idle: bool,
+    abandoned_in_a_row: u32,
 }
 
 impl MonitorRequests {
@@ -48,6 +74,7 @@ impl MonitorRequests {
             stalled: false,
             refresh_after_stall: false,
             apply_when_idle: false,
+            abandoned_in_a_row: 0,
         }
     }
 
@@ -126,6 +153,8 @@ impl MonitorRequests {
 
     pub(crate) fn finish(&mut self, request_id: u64) -> Option<Recovery> {
         self.pending.finish(request_id);
+        // The worker answered, so it isn't hanging.
+        self.abandoned_in_a_row = 0;
         if !self.pending.is_empty() || !std::mem::take(&mut self.stalled) {
             return None;
         }
@@ -136,19 +165,37 @@ impl MonitorRequests {
         })
     }
 
-    /// Returns true when a running request has just timed out, which leaves
-    /// the worker stalled until its outstanding requests finish.
-    pub(crate) fn check_timeout(&mut self, now: Instant) -> bool {
-        let timed_out = self
+    pub(crate) fn check_timeout(&mut self, now: Instant) -> Timeout {
+        if self.pending.any_running_for(now, MONITOR_ABANDON_TIMEOUT) {
+            return Timeout::Abandon;
+        }
+        if self
             .pending
             .mark_next_timeout(now, MONITOR_OPERATION_TIMEOUT)
-            .is_some();
-        self.stalled |= timed_out;
-        timed_out
+            .is_some()
+        {
+            self.stalled = true;
+            return Timeout::Stalled;
+        }
+        Timeout::None
     }
 
+    /// When [`Self::check_timeout`] should run next.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.pending.next_deadline(MONITOR_OPERATION_TIMEOUT)
+        self.pending
+            .next_deadline(MONITOR_OPERATION_TIMEOUT, MONITOR_ABANDON_TIMEOUT)
+    }
+
+    /// Forgets every outstanding request after the worker was given up on.
+    /// Only the first of several abandons in a row refreshes the new worker,
+    /// so a monitor that hangs every request doesn't cost another worker
+    /// thread every 30 seconds.
+    pub(crate) fn abandon(&mut self) -> Abandoned {
+        self.abandoned_in_a_row = self.abandoned_in_a_row.saturating_add(1);
+        Abandoned {
+            updates: self.reset(),
+            refresh: self.abandoned_in_a_row == 1,
+        }
     }
 
     /// Forgets every outstanding request after the worker was replaced and
@@ -258,14 +305,28 @@ impl PendingWorkerRequests {
         })
     }
 
-    /// When the earliest started request that hasn't timed out yet will.
-    fn next_deadline(&self, timeout: Duration) -> Option<Instant> {
+    /// The next moment a started request will time out, or, once it has,
+    /// will be due to be abandoned.
+    fn next_deadline(&self, timeout: Duration, abandon_after: Duration) -> Option<Instant> {
         self.requests
             .values()
-            .filter(|request| !request.timed_out)
-            .filter_map(|request| request.started_at)
+            .filter_map(|request| {
+                let limit = if request.timed_out {
+                    abandon_after
+                } else {
+                    timeout
+                };
+                request.started_at.map(|started_at| started_at + limit)
+            })
             .min()
-            .map(|started_at| started_at + timeout)
+    }
+
+    fn any_running_for(&self, now: Instant, duration: Duration) -> bool {
+        self.requests.values().any(|request| {
+            request
+                .started_at
+                .is_some_and(|started_at| now.saturating_duration_since(started_at) >= duration)
+        })
     }
 
     fn take_updates(&mut self) -> Vec<BrightnessUpdate> {
@@ -283,8 +344,8 @@ mod tests {
     use monbcon::{BrightnessUpdate, MonitorId};
 
     use super::{
-        MONITOR_OPERATION_TIMEOUT, MonitorRequests, PendingWorkerRequests, Recovery,
-        RefreshDecision, RefreshRequestState,
+        MONITOR_ABANDON_TIMEOUT, MONITOR_OPERATION_TIMEOUT, MonitorRequests, PendingWorkerRequests,
+        Recovery, RefreshDecision, RefreshRequestState, Timeout,
     };
 
     fn update(id: &str) -> BrightnessUpdate {
@@ -312,12 +373,58 @@ mod tests {
     }
 
     /// Starts a request and lets it time out, stalling the worker.
-    fn stall_on(requests: &mut MonitorRequests, request_id: u64) {
+    fn stall_on(requests: &mut MonitorRequests, request_id: u64) -> Instant {
         let started_at = Instant::now();
         requests.mark_started(request_id, started_at);
-        assert!(!requests.check_timeout(started_at + Duration::from_secs(9)));
-        assert!(requests.check_timeout(started_at + MONITOR_OPERATION_TIMEOUT));
+        assert_eq!(
+            requests.check_timeout(started_at + Duration::from_secs(9)),
+            Timeout::None
+        );
+        assert_eq!(
+            requests.check_timeout(started_at + MONITOR_OPERATION_TIMEOUT),
+            Timeout::Stalled
+        );
         assert!(requests.is_stalled());
+        started_at
+    }
+
+    #[test]
+    fn a_request_that_never_finishes_gets_its_worker_abandoned() {
+        let mut requests = MonitorRequests::new();
+        let apply = sent_apply(&mut requests, vec![update("a"), update("b")]);
+        let started_at = stall_on(&mut requests, apply);
+
+        assert_eq!(
+            requests.next_deadline(),
+            Some(started_at + MONITOR_ABANDON_TIMEOUT)
+        );
+        assert_eq!(
+            requests.check_timeout(started_at + MONITOR_ABANDON_TIMEOUT - Duration::from_secs(1)),
+            Timeout::None
+        );
+        assert_eq!(
+            requests.check_timeout(started_at + MONITOR_ABANDON_TIMEOUT),
+            Timeout::Abandon
+        );
+
+        let abandoned = requests.abandon();
+        assert_eq!(abandoned.updates.len(), 2);
+        assert!(abandoned.refresh);
+        assert!(!requests.is_stalled());
+        assert_eq!(requests.next_deadline(), None);
+    }
+
+    #[test]
+    fn only_the_first_of_several_abandons_in_a_row_refreshes() {
+        let mut requests = MonitorRequests::new();
+        assert!(requests.abandon().refresh);
+        assert!(!requests.abandon().refresh);
+        assert!(!requests.abandon().refresh);
+
+        // A request finishing shows the new worker responds again.
+        let apply = sent_apply(&mut requests, vec![update("a")]);
+        requests.finish(apply);
+        assert!(requests.abandon().refresh);
     }
 
     #[test]
@@ -551,16 +658,26 @@ mod tests {
         let mut requests = PendingWorkerRequests::default();
         requests.track(1, Vec::new());
         requests.track(2, Vec::new());
-        assert_eq!(requests.next_deadline(timeout), None);
+        let abandon_after = Duration::from_secs(30);
+        assert_eq!(requests.next_deadline(timeout, abandon_after), None);
 
         requests.mark_started(2, started_at + Duration::from_secs(3));
         requests.mark_started(1, started_at);
-        assert_eq!(requests.next_deadline(timeout), Some(started_at + timeout));
+        assert_eq!(
+            requests.next_deadline(timeout, abandon_after),
+            Some(started_at + timeout)
+        );
 
         requests.mark_next_timeout(started_at + timeout, timeout);
         assert_eq!(
-            requests.next_deadline(timeout),
+            requests.next_deadline(timeout, abandon_after),
             Some(started_at + Duration::from_secs(3) + timeout)
+        );
+
+        requests.mark_next_timeout(started_at + Duration::from_secs(13), timeout);
+        assert_eq!(
+            requests.next_deadline(timeout, abandon_after),
+            Some(started_at + abandon_after)
         );
     }
 

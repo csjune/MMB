@@ -74,17 +74,30 @@ component BrightnessSlider inherits Rectangle {
         }
     }
 
+    // Slint reports one mouse wheel notch as 60px. Touchpads and
+    // free-spinning wheels send many smaller deltas, which add up here so that
+    // each notch moves one step.
+    private property <length> wheel-notch: 60px;
+    private property <length> wheel-remainder: 0px;
+
     touch := TouchArea {
         scroll-event(event) => {
-            if event.delta-y > 0px {
-                root.scrolled(5);
-                return EventResult.accept;
-            } else if event.delta-y < 0px {
-                root.scrolled(-5);
-                return EventResult.accept;
+            if event.delta-y == 0px {
+                return EventResult.reject;
             }
 
-            return EventResult.reject;
+            // Turning the wheel back starts over instead of first cancelling
+            // out the partial notch.
+            if (event.delta-y > 0px && root.wheel-remainder < 0px) || (event.delta-y < 0px && root.wheel-remainder > 0px) {
+                root.wheel-remainder = 0px;
+            }
+            root.wheel-remainder += event.delta-y;
+            let steps = root.wheel-remainder > 0px ? floor(root.wheel-remainder / root.wheel-notch) : ceil(root.wheel-remainder / root.wheel-notch);
+            root.wheel-remainder -= steps * root.wheel-notch;
+            if steps != 0 {
+                root.scrolled(steps);
+            }
+            return EventResult.accept;
         }
 
         pointer-event(event) => {

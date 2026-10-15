@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod icons;
+mod log;
 mod monitor_requests;
 mod monitor_state;
 mod monitor_worker;
@@ -23,9 +24,10 @@ use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, Timer, TimerMode};
 
 use icons::Icons;
+use log::log;
 use monbcon::{ApplyReport, BrightnessUpdate, RefreshResult};
-use monitor_requests::{MonitorRequests, Recovery, RefreshDecision};
-use monitor_state::{MonitorState, brightness_after_scroll};
+use monitor_requests::{MonitorRequests, Recovery, RefreshDecision, Timeout};
+use monitor_state::{MonitorState, WheelAccumulator, brightness_after_scroll};
 use monitor_worker::{MonitorEvent, MonitorWorker};
 use notify::Notify;
 use popup::PopupController;
@@ -121,6 +123,7 @@ struct AppController {
     requests: RefCell<MonitorRequests>,
     refreshing: Cell<bool>,
     sync_all: Cell<bool>,
+    tray_wheel: RefCell<WheelAccumulator>,
     status_message: RefCell<SharedString>,
     theme_change_in_flight: Cell<bool>,
     dark_mode: Cell<bool>,
@@ -144,13 +147,13 @@ impl AppController {
                 // shell, so it runs on the UI thread instead.
                 run_on_app(move |app| {
                     if windows_integration::point_is_over_tray_icon(x, y) {
-                        app.scroll_all_brightness(delta);
+                        app.scroll_tray(delta);
                     }
                 });
             }),
         )
         .unwrap_or_else(|error| {
-            eprintln!("failed to install outside-click watcher: {error}; using polling fallback");
+            log!("failed to install outside-click watcher: {error}; using polling fallback");
             windows_integration::GlobalMouseWatcher::polling()
         });
         let app = Rc::new(Self {
@@ -165,6 +168,7 @@ impl AppController {
             requests: RefCell::new(MonitorRequests::new()),
             refreshing: Cell::new(false),
             sync_all: Cell::new(true),
+            tray_wheel: RefCell::new(WheelAccumulator::default()),
             status_message: RefCell::new(SharedString::default()),
             theme_change_in_flight: Cell::new(false),
             dark_mode: Cell::new(initial_dark_mode),
@@ -184,7 +188,7 @@ impl AppController {
                 return;
             }
             if let Err(error) = app.toggle_popup() {
-                eprintln!("failed to toggle popup: {error}");
+                log!("failed to toggle popup: {error}");
             }
         }));
 
@@ -238,12 +242,13 @@ impl AppController {
             return Ok(());
         }
 
+        // Keep the last known theme if it can't be read.
         match windows_integration::windows_main_dark_mode() {
             Ok(current_dark_mode) => self.apply_windows_theme(current_dark_mode),
-            Err(error) => windows_integration::show_error_message(
-                "MMB",
-                &format!("Couldn't read the current Windows theme.\n\n{error}"),
-            ),
+            Err(error) => {
+                log!("failed to read the Windows theme: {error}");
+                self.set_status_message("Couldn't read the Windows theme.");
+            }
         }
 
         let monitor_count = self.monitor_state.borrow().monitor_count();
@@ -258,23 +263,25 @@ impl AppController {
         self.schedule_apply();
     }
 
-    fn scroll_brightness(self: &Rc<Self>, monitor_id: SharedString, delta: i32) {
+    fn scroll_brightness(self: &Rc<Self>, monitor_id: SharedString, steps: i32) {
         let current = self
             .monitor_state
             .borrow()
             .brightness_for_monitor(monitor_id.as_str())
             .unwrap_or(50);
-        self.update_brightness(monitor_id, brightness_after_scroll(current, delta));
+        self.update_brightness(monitor_id, brightness_after_scroll(current, steps));
     }
 
-    fn scroll_all_brightness(self: &Rc<Self>, delta: i32) {
+    /// Handles a raw wheel delta over the tray icon.
+    fn scroll_tray(self: &Rc<Self>, delta: i32) {
+        let steps = self.tray_wheel.borrow_mut().steps(delta);
         // A refresh replaces every row and drops pending changes, and the
         // popup hides its sliders meanwhile, so ignore the wheel as well.
-        if self.refreshing.get() {
+        if steps == 0 || self.refreshing.get() {
             return;
         }
         let sync_all = self.sync_all.get();
-        self.update_monitor_state(|state| state.scroll_all(delta, sync_all));
+        self.update_monitor_state(|state| state.scroll_all(steps, sync_all));
         self.apply_immediately();
     }
 
@@ -346,7 +353,7 @@ impl AppController {
                 .borrow_mut()
                 .track(request_id, tracked_updates),
             Err(error) => {
-                eprintln!("failed to queue monitor refresh: {}", error.message);
+                log!("failed to queue monitor refresh: {}", error.message);
                 self.update_monitor_state(|state| state.restore_unsent(&error.updates));
                 self.requests.borrow_mut().cancel_refresh();
                 self.set_refreshing(false);
@@ -364,7 +371,7 @@ impl AppController {
                 .borrow_mut()
                 .track(request_id, tracked_updates),
             Err(error) => {
-                eprintln!("failed to queue brightness update: {}", error.message);
+                log!("failed to queue brightness update: {}", error.message);
                 self.update_monitor_state(|state| state.restore_unsent(&error.updates));
                 self.set_status_message("Couldn't change brightness.");
             }
@@ -394,7 +401,7 @@ impl AppController {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    eprintln!("monitor worker disconnected");
+                    log!("monitor worker disconnected");
                     self.restart_monitor_worker("Monitor service stopped.");
                     return;
                 }
@@ -420,12 +427,31 @@ impl AppController {
     }
 
     fn check_monitor_timeout(self: &Rc<Self>) {
-        let timed_out = self.requests.borrow_mut().check_timeout(Instant::now());
-        if timed_out {
-            self.set_refreshing(false);
-            self.set_status_message("Monitor service timed out.");
+        let timeout = self.requests.borrow_mut().check_timeout(Instant::now());
+        match timeout {
+            Timeout::None => {}
+            Timeout::Stalled => {
+                log!("monitor worker timed out");
+                self.set_refreshing(false);
+                self.set_status_message("Monitor service timed out.");
+            }
+            Timeout::Abandon => {
+                self.abandon_monitor_worker();
+                return;
+            }
         }
         self.arm_monitor_timeout();
+    }
+
+    /// Replaces a worker stuck in a hardware call. Its thread can't be
+    /// stopped, so it is left behind and ends once the call returns.
+    fn abandon_monitor_worker(self: &Rc<Self>) {
+        log!("monitor worker stopped responding; replacing it");
+        let abandoned = self.requests.borrow_mut().abandon();
+        self.replace_monitor_worker(&abandoned.updates, "Monitor service stopped responding.");
+        if abandoned.refresh {
+            self.request_refresh();
+        }
     }
 
     fn handle_refresh_result(
@@ -445,7 +471,7 @@ impl AppController {
             Ok(result) => {
                 let has_warnings = !result.warnings.is_empty();
                 for warning in result.warnings {
-                    eprintln!("{warning}");
+                    log!("{warning}");
                 }
                 self.update_monitor_state(|state| {
                     state.replace_snapshots(result.generation, result.snapshots)
@@ -457,7 +483,7 @@ impl AppController {
                 });
             }
             Err(error) => {
-                eprintln!("failed to refresh monitors: {error}");
+                log!("failed to refresh monitors: {error}");
                 self.set_status_message("Couldn't refresh monitors.");
             }
         }
@@ -483,7 +509,7 @@ impl AppController {
             self.set_status_message("");
         } else {
             for error in errors {
-                eprintln!("{error}");
+                log!("{error}");
             }
             self.set_status_message("Couldn't change brightness.");
         }
@@ -505,14 +531,20 @@ impl AppController {
 
     fn restart_monitor_worker(self: &Rc<Self>, status_message: &str) {
         let updates = self.requests.borrow_mut().reset();
-        self.update_monitor_state(|state| state.restore_unsent(&updates));
+        self.replace_monitor_worker(&updates, status_message);
+        self.request_refresh();
+    }
+
+    /// Starts a fresh worker and rolls back the brightness changes the old
+    /// one never confirmed.
+    fn replace_monitor_worker(self: &Rc<Self>, unsent: &[BrightnessUpdate], status_message: &str) {
+        self.update_monitor_state(|state| state.restore_unsent(unsent));
         self.monitor_worker.replace(MonitorWorker::new(app_notifier(
             AppController::drain_monitor_events,
         )));
         self.monitor_timeout_timer.stop();
         self.set_refreshing(false);
         self.set_status_message(status_message);
-        self.request_refresh();
     }
 
     fn set_status_message(&self, message: &str) {
@@ -534,7 +566,7 @@ impl AppController {
         self.set_status_message("");
 
         if let Err(error) = self.theme_worker.toggle() {
-            eprintln!("failed to queue Windows theme change: {error}");
+            log!("failed to queue Windows theme change: {error}");
             self.finish_theme_change();
             self.set_status_message("Couldn't change Windows theme.");
         }
@@ -547,14 +579,14 @@ impl AppController {
                     self.apply_windows_theme(dark_mode);
                 }
                 Ok(ThemeEvent::Changed(Err(error))) => {
-                    eprintln!("Windows theme watcher stopped: {error}");
+                    log!("Windows theme watcher stopped: {error}");
                 }
                 Ok(ThemeEvent::Toggled(Ok(dark_mode))) => {
                     self.apply_windows_theme(dark_mode);
                     self.finish_theme_change();
                 }
                 Ok(ThemeEvent::Toggled(Err(error))) => {
-                    eprintln!("failed to change Windows theme: {error}");
+                    log!("failed to change Windows theme: {error}");
                     if let Ok(dark_mode) = windows_integration::windows_main_dark_mode() {
                         self.apply_windows_theme(dark_mode);
                     }
@@ -563,7 +595,7 @@ impl AppController {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    eprintln!("theme worker disconnected");
+                    log!("theme worker disconnected");
                     self.finish_theme_change();
                     self.set_status_message("Theme service stopped.");
                     break;

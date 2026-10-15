@@ -1,5 +1,6 @@
 use std::mem;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -10,9 +11,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::wide_null;
+use crate::log::log;
 
 // Slint's Windows tray backend registers its icon on a message-only window of
-// this class, always with the same icon id.
+// this class, always with the same icon id. Slint has no API for the icon's
+// position, so these mirror its private `CLASS_NAME` and `TRAY_UID` in
+// i-slint-core's items/system_tray/windows.rs. Check them whenever Slint is
+// upgraded: if they change, scrolling over the tray icon silently stops
+// working, apart from the log message below.
 const SLINT_TRAY_WINDOW_CLASS: &str = "SlintSystemTrayWindow";
 const SLINT_TRAY_ICON_ID: u32 = 1;
 
@@ -47,6 +53,13 @@ pub(super) fn point_is_in_notification_area(x: i32, y: i32) -> bool {
 
 pub fn point_is_over_tray_icon(x: i32, y: i32) -> bool {
     let Some(window) = own_tray_window() else {
+        static REPORTED: AtomicBool = AtomicBool::new(false);
+        if !REPORTED.swap(true, Ordering::Relaxed) {
+            log!(
+                "couldn't find Slint's tray window ({SLINT_TRAY_WINDOW_CLASS}); \
+                 scrolling over the tray icon won't work"
+            );
+        }
         return false;
     };
 

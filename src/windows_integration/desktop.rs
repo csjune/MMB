@@ -5,6 +5,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
     MonitorFromPoint,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
 };
@@ -65,6 +66,11 @@ pub fn icon_sizes() -> IconSizes {
         small: metric(SM_CXSMICON).unwrap_or(16).max(16),
         large: metric(SM_CXICON).unwrap_or(32).max(32),
     }
+}
+
+pub fn debug_output(message: &str) {
+    let message = wide_null(message);
+    unsafe { OutputDebugStringW(message.as_ptr()) };
 }
 
 pub fn show_error_message(title: &str, message: &str) {

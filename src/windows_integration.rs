@@ -36,7 +36,7 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 #[cfg(windows)]
-pub use desktop::{icon_sizes, show_error_message, work_area_near_cursor};
+pub use desktop::{debug_output, icon_sizes, show_error_message, work_area_near_cursor};
 #[cfg(windows)]
 pub use mouse_hook::{GlobalMouseEvent, GlobalMouseWatcher};
 #[cfg(windows)]
@@ -144,11 +144,13 @@ mod fallback {
     pub fn show_error_message(title: &str, message: &str) {
         eprintln!("{title}: {message}");
     }
+
+    pub fn debug_output(_message: &str) {}
 }
 
 #[cfg(not(windows))]
 pub use fallback::{
-    GlobalMouseEvent, GlobalMouseWatcher, acquire_single_instance, icon_sizes,
+    GlobalMouseEvent, GlobalMouseWatcher, acquire_single_instance, debug_output, icon_sizes,
     next_windows_dark_mode, point_is_over_tray_icon, set_process_menu_dark_mode,
     set_windows_dark_mode, show_error_message, windows_main_dark_mode, work_area_near_cursor,
 };
