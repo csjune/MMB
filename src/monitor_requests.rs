@@ -78,7 +78,8 @@ impl MonitorRequests {
         }
     }
 
-    pub(crate) fn is_stalled(&self) -> bool {
+    #[cfg(test)]
+    fn is_stalled(&self) -> bool {
         self.stalled
     }
 

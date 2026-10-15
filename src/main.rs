@@ -17,7 +17,7 @@ use std::process;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(windows)]
 use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
@@ -118,7 +118,6 @@ struct AppController {
     monitor_state: RefCell<MonitorState>,
     monitor_worker: RefCell<MonitorWorker>,
     theme_worker: ThemeWorker,
-    apply_timer: Timer,
     monitor_timeout_timer: Timer,
     requests: RefCell<MonitorRequests>,
     refreshing: Cell<bool>,
@@ -163,7 +162,6 @@ impl AppController {
                 AppController::drain_monitor_events,
             ))),
             theme_worker: ThemeWorker::new(app_notifier(|app| app.drain_theme_events())),
-            apply_timer: Timer::default(),
             monitor_timeout_timer: Timer::default(),
             requests: RefCell::new(MonitorRequests::new()),
             refreshing: Cell::new(false),
@@ -260,7 +258,7 @@ impl AppController {
         self.update_monitor_state(|state| {
             state.update_brightness(monitor_id.as_str(), value, sync_all)
         });
-        self.schedule_apply();
+        self.apply_immediately();
     }
 
     fn scroll_brightness(self: &Rc<Self>, monitor_id: SharedString, steps: i32) {
@@ -293,24 +291,11 @@ impl AppController {
         result
     }
 
-    /// Applies pending brightness changes once the sliders have been still
-    /// for a second.
-    fn schedule_apply(self: &Rc<Self>) {
-        self.apply_timer.start(
-            TimerMode::SingleShot,
-            Duration::from_secs(1),
-            app_callback!(self, |app| {
-                if !app.requests.borrow().is_stalled() {
-                    app.send_pending_apply();
-                }
-            }),
-        );
-    }
-
     /// Applies pending brightness changes now, or as soon as the worker
-    /// finishes what it is doing, skipping the slider delay.
+    /// finishes what it is doing. While a slider is dragged or the wheel
+    /// spins, changes made in the meantime collapse into one apply of the
+    /// latest values.
     fn apply_immediately(self: &Rc<Self>) {
-        self.apply_timer.stop();
         if self.requests.borrow_mut().apply_now_or_when_idle() {
             self.send_pending_apply();
         }
@@ -334,7 +319,6 @@ impl AppController {
 
     /// Sends a refresh, carrying any brightness changes not applied yet.
     fn send_refresh(self: &Rc<Self>, request_id: u64) {
-        self.apply_timer.stop();
         let updates = self.monitor_state.borrow_mut().take_pending();
         self.set_refreshing(true);
         self.set_status_message("");
@@ -520,7 +504,7 @@ impl AppController {
         match recovery {
             Some(Recovery::Refresh) => self.request_refresh(),
             Some(Recovery::ResumeApply) if self.monitor_state.borrow().has_pending() => {
-                self.schedule_apply();
+                self.apply_immediately();
             }
             Some(Recovery::ResumeApply) | None => {}
         }
