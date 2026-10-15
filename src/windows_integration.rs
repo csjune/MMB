@@ -7,6 +7,12 @@ pub struct WorkArea {
     pub scale_factor: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct IconSizes {
+    pub small: u32,
+    pub large: u32,
+}
+
 #[cfg(windows)]
 #[path = "windows_integration/desktop.rs"]
 mod desktop;
@@ -30,7 +36,7 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 #[cfg(windows)]
-pub use desktop::{show_error_message, work_area_near_cursor};
+pub use desktop::{icon_sizes, show_error_message, work_area_near_cursor};
 #[cfg(windows)]
 pub use mouse_hook::{GlobalMouseEvent, GlobalMouseWatcher};
 #[cfg(windows)]
@@ -48,7 +54,7 @@ mod fallback {
     use std::fmt;
     use std::sync::mpsc::TryRecvError;
 
-    use super::WorkArea;
+    use super::{IconSizes, WorkArea};
 
     #[derive(Debug)]
     pub struct WindowsIntegrationError;
@@ -106,6 +112,13 @@ mod fallback {
         None
     }
 
+    pub fn icon_sizes() -> IconSizes {
+        IconSizes {
+            small: 16,
+            large: 32,
+        }
+    }
+
     pub fn point_is_over_tray_icon(_x: i32, _y: i32) -> bool {
         false
     }
@@ -135,7 +148,7 @@ mod fallback {
 
 #[cfg(not(windows))]
 pub use fallback::{
-    GlobalMouseEvent, GlobalMouseWatcher, acquire_single_instance, next_windows_dark_mode,
-    point_is_over_tray_icon, set_process_menu_dark_mode, set_windows_dark_mode, show_error_message,
-    windows_main_dark_mode, work_area_near_cursor,
+    GlobalMouseEvent, GlobalMouseWatcher, acquire_single_instance, icon_sizes,
+    next_windows_dark_mode, point_is_over_tray_icon, set_process_menu_dark_mode,
+    set_windows_dark_mode, show_error_message, windows_main_dark_mode, work_area_near_cursor,
 };

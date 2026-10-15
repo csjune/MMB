@@ -52,40 +52,8 @@ component BrightnessSlider inherits Rectangle {
     private property <length> tick-y: 26px;
     private property <float> step-size: 5;
 
-    Rectangle {
-        x: root.tick-x(0);
-        y: root.tick-y;
-        width: root.tick-width;
-        height: root.tick-height;
-        background: AppPalette.tick;
-    }
-
-    Rectangle {
-        x: root.tick-x(25);
-        y: root.tick-y;
-        width: root.tick-width;
-        height: root.tick-height;
-        background: AppPalette.tick;
-    }
-
-    Rectangle {
-        x: root.tick-x(50);
-        y: root.tick-y;
-        width: root.tick-width;
-        height: root.tick-height;
-        background: AppPalette.tick;
-    }
-
-    Rectangle {
-        x: root.tick-x(75);
-        y: root.tick-y;
-        width: root.tick-width;
-        height: root.tick-height;
-        background: AppPalette.tick;
-    }
-
-    Rectangle {
-        x: root.tick-x(100);
+    for value in [0, 25, 50, 75, 100] : Rectangle {
+        x: root.tick-x(value);
         y: root.tick-y;
         width: root.tick-width;
         height: root.tick-height;
@@ -281,7 +249,7 @@ component RefreshIndicator inherits Rectangle {
 
 export component MainWindow inherits Window {
     in property <image> app-icon;
-    in-out property <[MonitorEntry]> monitors;
+    in property <[MonitorEntry]> monitors;
     in-out property <bool> sync-all;
     in-out property <bool> dark-mode <=> AppPalette.dark-mode;
     in property <bool> has-monitors;

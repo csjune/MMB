@@ -5,11 +5,15 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
     MonitorFromPoint,
 };
-use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::HiDpi::{
+    GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    MB_ICONERROR, MB_OK, MessageBoxW, SM_CXICON, SM_CXSMICON,
+};
 
-use super::{WorkArea, wide_null};
+use super::{IconSizes, WorkArea, wide_null};
 
 pub fn work_area_near_cursor() -> Option<WorkArea> {
     let mut point = POINT { x: 0, y: 0 };
@@ -49,6 +53,17 @@ pub fn work_area_near_cursor() -> Option<WorkArea> {
             bottom: info.monitorInfo.rcWork.bottom,
             scale_factor: scale_factor_for_monitor(monitor),
         })
+    }
+}
+
+/// The sizes Windows draws small icons (tray, title bar) and large icons
+/// (Alt+Tab) at, for the system DPI.
+pub fn icon_sizes() -> IconSizes {
+    let dpi = unsafe { GetDpiForSystem() };
+    let metric = |index| u32::try_from(unsafe { GetSystemMetricsForDpi(index, dpi) }).ok();
+    IconSizes {
+        small: metric(SM_CXSMICON).unwrap_or(16).max(16),
+        large: metric(SM_CXICON).unwrap_or(32).max(32),
     }
 }
 
